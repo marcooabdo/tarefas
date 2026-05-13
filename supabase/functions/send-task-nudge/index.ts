@@ -48,6 +48,8 @@ Deno.serve(async (req: Request) => {
     const apiKey = settings["evolution_api_key"];
     const instanceName = settings["evolution_instance_name"];
     const systemPrompt = settings["ai_system_prompt"] ?? "";
+    const openaiKey = settings["openai_api_key"] ?? "";
+    const openaiModel = settings["openai_model"] || "gpt-4o-mini";
 
     if (!apiUrl || !apiKey || !instanceName) {
       return new Response(
@@ -66,16 +68,47 @@ Deno.serve(async (req: Request) => {
       else dueLabel = `vence em ${diffDays} dia(s)`;
     }
 
-    const greeting = systemPrompt
-      ? `Olá ${task.assignee_name}! `
-      : `Olá ${task.assignee_name}! Sou o gestor IA. `;
-    const message =
-      `${greeting}Passando para conferir o status da tarefa *"${task.title}"* (${dueLabel}).\n\n` +
+    const fallbackMessage =
+      `Olá ${task.assignee_name}! Aqui é a GIA, Executive Advisor do Sr. Marco Abdo. ` +
+      `Passando para conferir o status da tarefa *"${task.title}"* (${dueLabel}).\n\n` +
       `Responda apenas com o número correspondente:\n` +
       `1 - Concluída\n` +
       `2 - Em execução\n` +
       `3 - Bloqueada\n\n` +
       `Ref: ${task.task_code ?? "—"}`;
+
+    let message = fallbackMessage;
+    if (openaiKey) {
+      try {
+        const userBrief =
+          `Gere a mensagem de cobrança da seguinte tarefa para envio no WhatsApp.\n` +
+          `Responsável: ${task.assignee_name}\n` +
+          `Tarefa: ${task.title}\n` +
+          `Descrição: ${task.description ?? "—"}\n` +
+          `Prazo: ${dueLabel}\n` +
+          `Referência: ${task.task_code ?? "—"}\n\n` +
+          `A mensagem DEVE incluir explicitamente, em uma única seção:\n` +
+          `1 - Concluída\n2 - Em execução\n3 - Bloqueada\n\n` +
+          `Termine com "Ref: ${task.task_code ?? "—"}". Não inclua nada além da mensagem final.`;
+        const aiRes = await fetch("https://api.openai.com/v1/chat/completions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${openaiKey}` },
+          body: JSON.stringify({
+            model: openaiModel,
+            temperature: 0.4,
+            messages: [
+              { role: "system", content: systemPrompt },
+              { role: "user", content: userBrief },
+            ],
+          }),
+        });
+        if (aiRes.ok) {
+          const j = await aiRes.json();
+          const content = String(j?.choices?.[0]?.message?.content ?? "").trim();
+          if (content) message = content;
+        }
+      } catch { /* fallback */ }
+    }
 
     const isGroup = String(task.assignee_phone).includes("@g.us");
     const number = isGroup ? task.assignee_phone : String(task.assignee_phone).replace(/\D/g, "");

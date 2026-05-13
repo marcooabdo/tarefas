@@ -349,11 +349,49 @@ Deno.serve(async (req: Request) => {
       const apiUrl = settings["evolution_api_url"]?.replace(/\/$/, "");
       const apiKey = settings["evolution_api_key"];
       const instanceName = settings["evolution_instance_name"];
+      const openaiKey = settings["openai_api_key"] ?? "";
+      const openaiModel = settings["openai_model"] || "gpt-4o-mini";
+      const systemPrompt = settings["ai_system_prompt"] ?? "";
       if (apiUrl && apiKey && instanceName) {
         let replyText = replyFor(intent, String(match.assignee_name ?? ""), String(match.title ?? ""));
         if (recurred) {
           const firstName = String(match.assignee_name ?? "").split(" ")[0] || "tudo bem";
           replyText = `Perfeito, ${firstName}! Registrei "${match.title}" como concluída. Como é uma tarefa recorrente, já reagendei para o próximo ciclo.`;
+        }
+        if (openaiKey) {
+          try {
+            const intentLabel =
+              intent === "completed"
+                ? recurred
+                  ? "concluída (com recorrência reagendada para o próximo ciclo)"
+                  : "concluída"
+                : intent === "in_progress"
+                ? "em execução"
+                : "bloqueada";
+            const userBrief =
+              `O responsável "${match.assignee_name}" acabou de responder no WhatsApp confirmando o status da tarefa "${match.title}" como ${intentLabel}. ` +
+              (intent === "blocked"
+                ? `Confirme o registro do bloqueio e peça brevemente o que está impedindo o avanço para que possa escalar se necessário. `
+                : `Confirme o registro de forma curta e cordial. `) +
+              `Não inclua a referência da tarefa nesta mensagem. Não inclua as opções 1/2/3. Máximo 3 linhas.`;
+            const aiRes = await fetch("https://api.openai.com/v1/chat/completions", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", Authorization: `Bearer ${openaiKey}` },
+              body: JSON.stringify({
+                model: openaiModel,
+                temperature: 0.5,
+                messages: [
+                  { role: "system", content: systemPrompt },
+                  { role: "user", content: userBrief },
+                ],
+              }),
+            });
+            if (aiRes.ok) {
+              const j = await aiRes.json();
+              const content = String(j?.choices?.[0]?.message?.content ?? "").trim();
+              if (content) replyText = content;
+            }
+          } catch { /* fallback */ }
         }
         const number = isGroup ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
         try {
