@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Plus, Phone, Users as Users2, Clock, Zap, CircleAlert as AlertCircle, Flame, Trash2, Send, LayoutGrid, List as ListIcon, X, Search, Check, Repeat } from 'lucide-react';
+import { Plus, Phone, Users as Users2, Clock, Zap, CircleAlert as AlertCircle, Flame, Trash2, Send, LayoutGrid, List as ListIcon, X, Search, Check, Repeat, Pencil } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import type { Task, TaskPriority, TaskStatus, TaskRecurrence, Contact } from '../lib/types';
 import { TASK_COLUMNS, RECURRENCE_OPTIONS } from '../lib/types';
@@ -76,6 +76,7 @@ export function Tasks() {
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState<'kanban' | 'list'>('kanban');
   const [modalOpen, setModalOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft>(emptyDraft);
   const [saving, setSaving] = useState(false);
   const [nudgingId, setNudgingId] = useState<string | null>(null);
@@ -98,7 +99,38 @@ export function Tasks() {
   }
 
   function openCreateTask() {
+    setEditingId(null);
     setDraft({ ...emptyDraft, first_nudge_at: defaultFirstNudge() });
+    setRecipientSearch('');
+    setRecipientFilter('all');
+    setModalOpen(true);
+  }
+
+  function openEditTask(t: Task) {
+    setEditingId(t.id);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const toLocalInput = (iso: string | null) => {
+      if (!iso) return '';
+      const d = new Date(iso);
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    };
+    const toLocalDate = (iso: string | null) => {
+      if (!iso) return '';
+      const d = new Date(iso);
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    };
+    setDraft({
+      title: t.title,
+      description: t.description ?? '',
+      status: t.status,
+      priority: t.priority,
+      due_date: toLocalDate(t.due_date),
+      recipient_ids: [],
+      recurrence: t.recurrence,
+      recurrence_interval: t.recurrence_interval ?? 1,
+      first_nudge_at: toLocalInput(t.first_nudge_at),
+      nudge_repeat_hours: t.nudge_repeat_hours ?? 0,
+    });
     setRecipientSearch('');
     setRecipientFilter('all');
     setModalOpen(true);
@@ -129,30 +161,52 @@ export function Tasks() {
     return map;
   }, [tasks]);
 
-  async function createTask() {
-    if (!draft.title.trim() || draft.recipient_ids.length === 0) return;
+  async function saveTask() {
+    if (!draft.title.trim()) return;
+    if (!editingId && draft.recipient_ids.length === 0) return;
     setSaving(true);
-    const recipients = contacts.filter((c) => draft.recipient_ids.includes(c.id));
     const due = draft.due_date ? new Date(draft.due_date).toISOString() : null;
     const firstNudge = draft.first_nudge_at ? new Date(draft.first_nudge_at).toISOString() : null;
-    const rows = recipients.map((r) => ({
-      title: draft.title,
-      description: draft.description,
-      assignee_name: r.name,
-      assignee_phone: r.phone,
-      group_name: r.is_group ? r.name : (r.department || ''),
-      status: draft.status,
-      priority: draft.priority,
-      due_date: due,
-      recurrence: draft.recurrence,
-      recurrence_interval: draft.recurrence_interval,
-      first_nudge_at: firstNudge,
-      nudge_repeat_hours: draft.nudge_repeat_hours,
-      nudge_active: !!firstNudge,
-    }));
-    await supabase.from('tasks').insert(rows);
+
+    if (editingId) {
+      await supabase
+        .from('tasks')
+        .update({
+          title: draft.title,
+          description: draft.description,
+          status: draft.status,
+          priority: draft.priority,
+          due_date: due,
+          recurrence: draft.recurrence,
+          recurrence_interval: draft.recurrence_interval,
+          first_nudge_at: firstNudge,
+          nudge_repeat_hours: draft.nudge_repeat_hours,
+          nudge_active: !!firstNudge,
+        })
+        .eq('id', editingId);
+    } else {
+      const recipients = contacts.filter((c) => draft.recipient_ids.includes(c.id));
+      const rows = recipients.map((r) => ({
+        title: draft.title,
+        description: draft.description,
+        assignee_name: r.name,
+        assignee_phone: r.phone,
+        group_name: r.is_group ? r.name : (r.department || ''),
+        status: draft.status,
+        priority: draft.priority,
+        due_date: due,
+        recurrence: draft.recurrence,
+        recurrence_interval: draft.recurrence_interval,
+        first_nudge_at: firstNudge,
+        nudge_repeat_hours: draft.nudge_repeat_hours,
+        nudge_active: !!firstNudge,
+      }));
+      await supabase.from('tasks').insert(rows);
+    }
+
     setSaving(false);
     setModalOpen(false);
+    setEditingId(null);
     setDraft(emptyDraft);
     load();
   }
@@ -273,10 +327,20 @@ export function Tasks() {
             {nudgingId === t.id ? 'Enviando...' : 'Cobrar via IA'}
           </button>
           <button
+            onClick={() => openEditTask(t)}
+            className="ghost-btn"
+            style={{ padding: '8px 10px' }}
+            aria-label="Editar"
+            title="Editar"
+          >
+            <Pencil size={13} />
+          </button>
+          <button
             onClick={() => removeTask(t.id)}
             className="ghost-btn"
             style={{ padding: '8px 10px' }}
             aria-label="Remover"
+            title="Remover"
           >
             <Trash2 size={13} />
           </button>
@@ -420,14 +484,34 @@ export function Tasks() {
                   </td>
                   <td style={{ padding: '14px 16px', fontSize: '12px', color: '#b347ff', fontWeight: 600 }}>{t.ai_interventions}x</td>
                   <td style={{ padding: '14px 16px' }}>
-                    <button
-                      onClick={() => forceAiNudge(t)}
-                      disabled={nudgingId === t.id || t.status === 'completed'}
-                      className="neon-btn"
-                      style={{ padding: '6px 10px', fontSize: '11px' }}
-                    >
-                      <Send size={11} /> Cobrar
-                    </button>
+                    <div style={{ display: 'flex', gap: '6px' }}>
+                      <button
+                        onClick={() => forceAiNudge(t)}
+                        disabled={nudgingId === t.id || t.status === 'completed'}
+                        className="neon-btn"
+                        style={{ padding: '6px 10px', fontSize: '11px' }}
+                      >
+                        <Send size={11} /> Cobrar
+                      </button>
+                      <button
+                        onClick={() => openEditTask(t)}
+                        className="ghost-btn"
+                        style={{ padding: '6px 8px' }}
+                        aria-label="Editar"
+                        title="Editar"
+                      >
+                        <Pencil size={12} />
+                      </button>
+                      <button
+                        onClick={() => removeTask(t.id)}
+                        className="ghost-btn"
+                        style={{ padding: '6px 8px' }}
+                        aria-label="Remover"
+                        title="Remover"
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -452,7 +536,7 @@ export function Tasks() {
             style={{ width: '100%', maxWidth: '620px', padding: '28px', maxHeight: '90vh', overflowY: 'auto' }}
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-              <h2 style={{ fontSize: '20px', fontWeight: 700, color: '#f4f6fb', margin: 0 }}>Nova Tarefa</h2>
+              <h2 style={{ fontSize: '20px', fontWeight: 700, color: '#f4f6fb', margin: 0 }}>{editingId ? 'Editar Tarefa' : 'Nova Tarefa'}</h2>
               <button onClick={() => setModalOpen(false)} className="ghost-btn" style={{ padding: '6px' }}>
                 <X size={16} />
               </button>
@@ -477,6 +561,7 @@ export function Tasks() {
                 />
               </Field>
 
+              {!editingId && (
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
                   <span style={{ fontSize: '11px', color: '#9aa3b2', fontWeight: 600, letterSpacing: '0.4px', textTransform: 'uppercase' }}>
@@ -606,6 +691,7 @@ export function Tasks() {
                   Uma tarefa será criada para cada destinatário selecionado.
                 </div>
               </div>
+              )}
 
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px' }}>
                 <Field label="Status">
@@ -710,11 +796,17 @@ export function Tasks() {
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '24px' }}>
               <button onClick={() => setModalOpen(false)} className="ghost-btn">Cancelar</button>
               <button
-                onClick={createTask}
+                onClick={saveTask}
                 className="neon-btn"
-                disabled={saving || !draft.title.trim() || draft.recipient_ids.length === 0}
+                disabled={saving || !draft.title.trim() || (!editingId && draft.recipient_ids.length === 0)}
               >
-                {saving ? 'Salvando...' : draft.recipient_ids.length > 1 ? `Criar ${draft.recipient_ids.length} Tarefas` : 'Criar Tarefa'}
+                {saving
+                  ? 'Salvando...'
+                  : editingId
+                  ? 'Salvar Alterações'
+                  : draft.recipient_ids.length > 1
+                  ? `Criar ${draft.recipient_ids.length} Tarefas`
+                  : 'Criar Tarefa'}
               </button>
             </div>
           </div>
