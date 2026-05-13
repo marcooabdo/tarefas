@@ -84,6 +84,9 @@ export interface Task {
   completed_at: string | null;
   recurrence: TaskRecurrence;
   recurrence_interval: number;
+  first_nudge_at: string | null;
+  nudge_repeat_hours: number;
+  nudge_active: boolean;
   created_at: string;
   updated_at: string;
 }

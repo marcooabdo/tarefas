@@ -39,6 +39,15 @@ interface Draft {
   recipient_ids: string[];
   recurrence: TaskRecurrence;
   recurrence_interval: number;
+  first_nudge_at: string;
+  nudge_repeat_hours: number;
+}
+
+function defaultFirstNudge(): string {
+  const d = new Date();
+  d.setHours(d.getHours() + 1, 0, 0, 0);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 const emptyDraft: Draft = {
@@ -50,6 +59,8 @@ const emptyDraft: Draft = {
   recipient_ids: [],
   recurrence: 'none',
   recurrence_interval: 1,
+  first_nudge_at: '',
+  nudge_repeat_hours: 0,
 };
 
 const RECURRENCE_LABEL: Record<TaskRecurrence, string> = {
@@ -87,7 +98,7 @@ export function Tasks() {
   }
 
   function openCreateTask() {
-    setDraft(emptyDraft);
+    setDraft({ ...emptyDraft, first_nudge_at: defaultFirstNudge() });
     setRecipientSearch('');
     setRecipientFilter('all');
     setModalOpen(true);
@@ -123,6 +134,7 @@ export function Tasks() {
     setSaving(true);
     const recipients = contacts.filter((c) => draft.recipient_ids.includes(c.id));
     const due = draft.due_date ? new Date(draft.due_date).toISOString() : null;
+    const firstNudge = draft.first_nudge_at ? new Date(draft.first_nudge_at).toISOString() : null;
     const rows = recipients.map((r) => ({
       title: draft.title,
       description: draft.description,
@@ -134,6 +146,9 @@ export function Tasks() {
       due_date: due,
       recurrence: draft.recurrence,
       recurrence_interval: draft.recurrence_interval,
+      first_nudge_at: firstNudge,
+      nudge_repeat_hours: draft.nudge_repeat_hours,
+      nudge_active: !!firstNudge,
     }));
     await supabase.from('tasks').insert(rows);
     setSaving(false);
@@ -649,6 +664,46 @@ export function Tasks() {
                     />
                   </Field>
                 )}
+              </div>
+
+              <div style={{
+                border: '1px solid rgba(0,229,255,0.18)',
+                borderRadius: '12px',
+                padding: '14px 16px',
+                background: 'rgba(0,229,255,0.04)',
+                display: 'flex', flexDirection: 'column', gap: '12px',
+              }}>
+                <div style={{ fontSize: '11px', color: '#00e5ff', fontWeight: 700, letterSpacing: '1px', textTransform: 'uppercase' }}>
+                  Cobrança automática (GIA)
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: '12px' }}>
+                  <Field label="Primeira cobrança" hint="Data e horário do primeiro envio. Deixe em branco para não cobrar automaticamente.">
+                    <input
+                      type="datetime-local"
+                      className="nx-input"
+                      value={draft.first_nudge_at}
+                      onChange={(e) => setDraft({ ...draft, first_nudge_at: e.target.value })}
+                    />
+                  </Field>
+                  <Field label="Repetir a cada" hint={draft.nudge_repeat_hours === 0 ? 'Envio único' : `${draft.nudge_repeat_hours}h enquanto pendente`}>
+                    <select
+                      className="nx-input"
+                      value={draft.nudge_repeat_hours}
+                      onChange={(e) => setDraft({ ...draft, nudge_repeat_hours: parseInt(e.target.value, 10) })}
+                    >
+                      <option value={0} style={{ background: '#0e1016' }}>Envio único</option>
+                      <option value={1} style={{ background: '#0e1016' }}>1 hora</option>
+                      <option value={2} style={{ background: '#0e1016' }}>2 horas</option>
+                      <option value={3} style={{ background: '#0e1016' }}>3 horas</option>
+                      <option value={6} style={{ background: '#0e1016' }}>6 horas</option>
+                      <option value={12} style={{ background: '#0e1016' }}>12 horas</option>
+                      <option value={24} style={{ background: '#0e1016' }}>1 dia</option>
+                      <option value={48} style={{ background: '#0e1016' }}>2 dias</option>
+                      <option value={72} style={{ background: '#0e1016' }}>3 dias</option>
+                      <option value={168} style={{ background: '#0e1016' }}>1 semana</option>
+                    </select>
+                  </Field>
+                </div>
               </div>
             </div>
 

@@ -22,13 +22,6 @@ Deno.serve(async (req: Request) => {
     const settings: Record<string, string> = {};
     for (const row of settingsRows ?? []) settings[row.key] = row.value;
 
-    const proactiveEnabled = settings["ai_proactive_overdue"] !== "false";
-    if (!proactiveEnabled) {
-      return new Response(JSON.stringify({ skipped: "proactive disabled" }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-
     const apiUrl = settings["evolution_api_url"]?.replace(/\/$/, "");
     const apiKey = settings["evolution_api_key"];
     const instanceName = settings["evolution_instance_name"];
@@ -43,26 +36,33 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    const nowIso = new Date().toISOString();
-    const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+    const now = Date.now();
+    const nowIso = new Date(now).toISOString();
 
     const { data: tasks } = await supabase
       .from("tasks")
       .select("*")
       .neq("status", "completed")
-      .not("due_date", "is", null)
-      .lt("due_date", nowIso);
+      .eq("nudge_active", true)
+      .not("first_nudge_at", "is", null)
+      .lte("first_nudge_at", nowIso);
 
-    const overdue = (tasks ?? []).filter(
-      (t) => !t.last_ai_nudge || new Date(t.last_ai_nudge).toISOString() < sixHoursAgo
-    );
+    const due_now = (tasks ?? []).filter((t) => {
+      if (!t.last_ai_nudge) return true;
+      if (!t.nudge_repeat_hours || t.nudge_repeat_hours <= 0) return false;
+      const lastMs = new Date(t.last_ai_nudge).getTime();
+      return now - lastMs >= t.nudge_repeat_hours * 60 * 60 * 1000;
+    });
 
     const results: Array<{ task_id: string; status: string; error?: string }> = [];
 
-    for (const task of overdue) {
-      const due = new Date(task.due_date);
-      const diffDays = Math.ceil((Date.now() - due.getTime()) / (1000 * 60 * 60 * 24));
-      const dueLabel = diffDays <= 0 ? "vence hoje" : `está ${diffDays} dia(s) atrasada`;
+    for (const task of due_now) {
+      let dueLabel = "sem prazo";
+      if (task.due_date) {
+        const due = new Date(task.due_date);
+        const diffDays = Math.ceil((Date.now() - due.getTime()) / (1000 * 60 * 60 * 24));
+        dueLabel = diffDays <= 0 ? "vence hoje" : `está ${diffDays} dia(s) atrasada`;
+      }
       const firstName = (task.assignee_name ?? "").split(" ")[0] || "time";
       const fallbackMessage =
         `Olá ${firstName}! Aqui é a GIA, Executive Advisor do Sr. Marco Abdo. ` +
@@ -127,12 +127,14 @@ Deno.serve(async (req: Request) => {
         });
 
         if (ok) {
+          const isSingle = !task.nudge_repeat_hours || task.nudge_repeat_hours <= 0;
           await supabase
             .from("tasks")
             .update({
               ai_interventions: (task.ai_interventions ?? 0) + 1,
               last_ai_nudge: new Date().toISOString(),
               status: task.status === "completed" ? "completed" : "awaiting_response",
+              nudge_active: !isSingle,
             })
             .eq("id", task.id);
         }
