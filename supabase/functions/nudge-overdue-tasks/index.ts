@@ -1,0 +1,120 @@
+import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { createClient } from "npm:@supabase/supabase-js@2";
+
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
+};
+
+Deno.serve(async (req: Request) => {
+  if (req.method === "OPTIONS") {
+    return new Response(null, { status: 200, headers: corsHeaders });
+  }
+
+  try {
+    const supabase = createClient(
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+    );
+
+    const { data: settingsRows } = await supabase.from("app_settings").select("key, value");
+    const settings: Record<string, string> = {};
+    for (const row of settingsRows ?? []) settings[row.key] = row.value;
+
+    const proactiveEnabled = settings["ai_proactive_overdue"] !== "false";
+    if (!proactiveEnabled) {
+      return new Response(JSON.stringify({ skipped: "proactive disabled" }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    const apiUrl = settings["evolution_api_url"]?.replace(/\/$/, "");
+    const apiKey = settings["evolution_api_key"];
+    const instanceName = settings["evolution_instance_name"];
+
+    if (!apiUrl || !apiKey || !instanceName) {
+      return new Response(JSON.stringify({ error: "Evolution API not configured" }), {
+        status: 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    const nowIso = new Date().toISOString();
+    const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+
+    const { data: tasks } = await supabase
+      .from("tasks")
+      .select("*")
+      .neq("status", "completed")
+      .not("due_date", "is", null)
+      .lt("due_date", nowIso);
+
+    const overdue = (tasks ?? []).filter(
+      (t) => !t.last_ai_nudge || new Date(t.last_ai_nudge).toISOString() < sixHoursAgo
+    );
+
+    const results: Array<{ task_id: string; status: string; error?: string }> = [];
+
+    for (const task of overdue) {
+      const due = new Date(task.due_date);
+      const diffDays = Math.ceil((Date.now() - due.getTime()) / (1000 * 60 * 60 * 24));
+      const dueLabel = diffDays <= 0 ? "vence hoje" : `está ${diffDays} dia(s) atrasada`;
+      const firstName = (task.assignee_name ?? "").split(" ")[0] || "time";
+      const message =
+        `Oi ${firstName}! A tarefa *"${task.title}"* ${dueLabel}.\n\n` +
+        `Responda apenas com o número:\n` +
+        `1 - Concluída\n` +
+        `2 - Em execução\n` +
+        `3 - Bloqueada\n\n` +
+        `Ref: ${task.task_code ?? "—"}`;
+      const isGroup = String(task.assignee_phone).includes("@g.us");
+      const number = isGroup ? task.assignee_phone : String(task.assignee_phone).replace(/\D/g, "");
+
+      try {
+        const r = await fetch(`${apiUrl}/message/sendText/${instanceName}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", apikey: apiKey },
+          body: JSON.stringify({ number, text: message }),
+        });
+        const ok = r.ok;
+        const err = ok ? null : await r.text();
+
+        await supabase.from("send_logs").insert({
+          contact_name: task.assignee_name,
+          contact_phone: task.assignee_phone,
+          template_name: "Cobrança proativa (atraso)",
+          message_content: message,
+          status: ok ? "sent" : "error",
+          error_message: err,
+          sent_at: new Date().toISOString(),
+        });
+
+        if (ok) {
+          await supabase
+            .from("tasks")
+            .update({
+              ai_interventions: (task.ai_interventions ?? 0) + 1,
+              last_ai_nudge: new Date().toISOString(),
+              status: task.status === "completed" ? "completed" : "awaiting_response",
+            })
+            .eq("id", task.id);
+        }
+
+        results.push({ task_id: task.id, status: ok ? "sent" : "error", error: err ?? undefined });
+      } catch (e) {
+        results.push({ task_id: task.id, status: "error", error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+
+    return new Response(
+      JSON.stringify({ processed: results.length, results }),
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
+  } catch (err) {
+    return new Response(
+      JSON.stringify({ error: err instanceof Error ? err.message : String(err) }),
+      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
+  }
+});
