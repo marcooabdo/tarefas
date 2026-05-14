@@ -169,6 +169,67 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
+    const giaMatch = /^\s*GIA\s*:\s*(.+)$/is.exec(text);
+    if (giaMatch && remoteJid) {
+      const { data: settingsRowsGia } = await supabase.from("app_settings").select("key, value");
+      const settingsGia: Record<string, string> = {};
+      for (const row of settingsRowsGia ?? []) settingsGia[row.key] = row.value;
+      const ownerPhone = settingsGia["owner_phone"] ?? "";
+      const incoming = remoteJid.split("@")[0];
+      const isOwner = ownerPhone && phonesMatch(ownerPhone, incoming);
+
+      if (isOwner) {
+        const raw = giaMatch[1].trim().replace(/\s+/g, " ");
+        const firstLine = raw.split(/\n/)[0].trim();
+        const title = firstLine.length > 140 ? firstLine.slice(0, 140) : firstLine;
+        const description = raw.length > title.length ? raw.slice(title.length).trim() : "";
+        const ownerName = settingsGia["owner_name"] || "Eu";
+
+        const { data: created } = await supabase
+          .from("tasks")
+          .insert({
+            title,
+            description,
+            assignee_name: ownerName,
+            assignee_phone: normalizePhone(ownerPhone),
+            group_name: "",
+            status: "pending",
+            priority: "medium",
+            due_date: null,
+            recurrence: "none",
+            recurrence_interval: 1,
+            first_nudge_at: null,
+            nudge_repeat_hours: 0,
+            nudge_active: false,
+          })
+          .select()
+          .maybeSingle();
+
+        const apiUrlGia = settingsGia["evolution_api_url"]?.replace(/\/$/, "");
+        const apiKeyGia = settingsGia["evolution_api_key"];
+        const instanceGia = settingsGia["evolution_instance_name"];
+        const autoReplyGia = settingsGia["ai_auto_reply"] !== "false";
+        if (autoReplyGia && apiUrlGia && apiKeyGia && instanceGia) {
+          const numberGia = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
+          const code = created?.task_code ? ` (${created.task_code})` : "";
+          await fetch(`${apiUrlGia}/message/sendText/${instanceGia}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", apikey: apiKeyGia },
+            body: JSON.stringify({
+              number: numberGia,
+              text: `Tarefa criada${code}: "${title}".`,
+            }),
+          });
+        }
+
+        await logEvent("gia-task-created", String(created?.id ?? ""));
+        return new Response(
+          JSON.stringify({ created: true, task_id: created?.id, title }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+    }
+
     if (fromMe || !remoteJid || (!text && !buttonId)) {
       await logEvent("ignored", `fromMe=${fromMe} jid=${!!remoteJid} text=${!!text} btn=${!!buttonId}`);
       return new Response(JSON.stringify({ ignored: true }), {
