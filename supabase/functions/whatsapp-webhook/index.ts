@@ -292,7 +292,11 @@ Deno.serve(async (req: Request) => {
             );
             if (found) {
               assigneeName = found.name;
-              assigneePhone = found.is_group ? String(found.remote_jid ?? "") : normalizePhone(`${found.country_code ?? ""}${found.phone ?? ""}`);
+              if (found.remote_jid) {
+                assigneePhone = found.is_group ? String(found.remote_jid) : normalizePhone(String(found.remote_jid).split("@")[0]);
+              } else {
+                assigneePhone = normalizePhone(String(found.phone ?? ""));
+              }
               if (found.is_group) groupName = found.name;
             } else {
               assigneeName = assigneeRaw;
@@ -309,13 +313,21 @@ Deno.serve(async (req: Request) => {
             if (byName && byName.length === 1) {
               const c = byName[0];
               assigneeName = c.name;
-              assigneePhone = c.is_group ? String(c.remote_jid ?? "") : normalizePhone(`${c.country_code ?? ""}${c.phone ?? ""}`);
+              if (c.remote_jid) {
+                assigneePhone = c.is_group ? String(c.remote_jid) : normalizePhone(String(c.remote_jid).split("@")[0]);
+              } else {
+                assigneePhone = normalizePhone(String(c.phone ?? ""));
+              }
               if (c.is_group) groupName = c.name;
             } else if (byName && byName.length > 1) {
               const exact = byName.find((c) => c.name.toLowerCase() === assigneeRaw.toLowerCase());
               if (exact) {
                 assigneeName = exact.name;
-                assigneePhone = exact.is_group ? String(exact.remote_jid ?? "") : normalizePhone(`${exact.country_code ?? ""}${exact.phone ?? ""}`);
+                if (exact.remote_jid) {
+                  assigneePhone = exact.is_group ? String(exact.remote_jid) : normalizePhone(String(exact.remote_jid).split("@")[0]);
+                } else {
+                  assigneePhone = normalizePhone(String(exact.phone ?? ""));
+                }
                 if (exact.is_group) groupName = exact.name;
               } else {
                 resolveNote = ` (atribuído a você porque havia múltiplos contatos com "${assigneeRaw}": ${byName.map((c) => c.name).join(", ")})`;
