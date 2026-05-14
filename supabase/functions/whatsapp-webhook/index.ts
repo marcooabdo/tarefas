@@ -169,7 +169,7 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const giaMatch = /^\s*GIA\s*:\s*(.+)$/is.exec(text);
+    const giaMatch = /^\s*GIA\s*:\s*([\s\S]+)$/i.exec(text);
     if (giaMatch && remoteJid) {
       const { data: settingsRowsGia } = await supabase.from("app_settings").select("key, value");
       const settingsGia: Record<string, string> = {};
@@ -179,28 +179,169 @@ Deno.serve(async (req: Request) => {
       const isOwner = ownerPhone && phonesMatch(ownerPhone, incoming);
 
       if (isOwner) {
-        const raw = giaMatch[1].trim().replace(/\s+/g, " ");
-        const firstLine = raw.split(/\n/)[0].trim();
-        const title = firstLine.length > 140 ? firstLine.slice(0, 140) : firstLine;
-        const description = raw.length > title.length ? raw.slice(title.length).trim() : "";
-        const ownerName = settingsGia["owner_name"] || "Eu";
+        const body = giaMatch[1].trim();
+        const fields: Record<string, string> = {};
+        const fieldAliases: Record<string, string> = {
+          titulo: "title", título: "title", title: "title", tarefa: "title",
+          descricao: "description", descrição: "description", desc: "description", description: "description",
+          para: "assignee", destinatario: "assignee", destinatário: "assignee", responsavel: "assignee", responsável: "assignee", assignee: "assignee", quem: "assignee",
+          prioridade: "priority", priority: "priority",
+          prazo: "due", vencimento: "due", due: "due", quando: "due", data: "due",
+          recorrencia: "recurrence", recorrência: "recurrence", recurrence: "recurrence",
+          cobranca: "nudge", cobrança: "nudge", nudge: "nudge",
+          repetir: "repeat", repeat: "repeat", intervalo: "repeat",
+        };
+        const lines = body.split(/\n+/).map((l) => l.trim()).filter(Boolean);
+        const knownKeyRegex = /^([A-Za-zÀ-ú\s]+?)\s*:\s*(.+)$/;
+        const titleParts: string[] = [];
+        for (const line of lines) {
+          const m = knownKeyRegex.exec(line);
+          if (m) {
+            const key = m[1].trim().toLowerCase().replace(/\s+/g, "");
+            const mapped = fieldAliases[key];
+            if (mapped) {
+              fields[mapped] = (fields[mapped] ? fields[mapped] + " " : "") + m[2].trim();
+              continue;
+            }
+          }
+          titleParts.push(line);
+        }
+        if (!fields.title && titleParts.length) {
+          fields.title = titleParts.shift() ?? "";
+          if (titleParts.length && !fields.description) fields.description = titleParts.join("\n");
+        } else if (titleParts.length && !fields.description) {
+          fields.description = titleParts.join("\n");
+        }
+
+        const title = (fields.title ?? "").trim().slice(0, 200) || "Tarefa sem título";
+        const description = (fields.description ?? "").trim();
+
+        const priorityRaw = (fields.priority ?? "").toLowerCase();
+        const priority =
+          /alta|high|urgente/.test(priorityRaw) ? "high" :
+          /baixa|low/.test(priorityRaw) ? "low" : "medium";
+
+        const recurrenceRaw = (fields.recurrence ?? "").toLowerCase();
+        let recurrence: "none" | "daily" | "weekdays" | "weekly" | "monthly" = "none";
+        let recurrenceInterval = 1;
+        if (/diari|daily|todo dia|todos os dias/.test(recurrenceRaw)) recurrence = "daily";
+        else if (/util|úteis|weekdays|dias [úu]te/.test(recurrenceRaw)) recurrence = "weekdays";
+        else if (/seman|weekly/.test(recurrenceRaw)) recurrence = "weekly";
+        else if (/mens|month/.test(recurrenceRaw)) recurrence = "monthly";
+        const intervalMatch = /(?:x|cada|a cada|every)\s*(\d+)/i.exec(recurrenceRaw);
+        if (intervalMatch) recurrenceInterval = Math.max(1, Number(intervalMatch[1]));
+
+        function parseDate(input: string): string | null {
+          if (!input) return null;
+          const s = input.trim();
+          const tzOffsetMs = -3 * 60 * 60 * 1000;
+          const now = new Date();
+          const localNow = new Date(now.getTime() + tzOffsetMs);
+          const hhmm = /(\d{1,2})[:hH](\d{2})/.exec(s);
+          let hour = 9, minute = 0;
+          if (hhmm) { hour = Number(hhmm[1]); minute = Number(hhmm[2]); }
+          let y = localNow.getUTCFullYear(), mo = localNow.getUTCMonth(), d = localNow.getUTCDate();
+          let matched = false;
+          const iso = /(\d{4})-(\d{2})-(\d{2})/.exec(s);
+          const dmy = /(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/.exec(s);
+          if (iso) {
+            y = Number(iso[1]); mo = Number(iso[2]) - 1; d = Number(iso[3]); matched = true;
+          } else if (dmy) {
+            d = Number(dmy[1]); mo = Number(dmy[2]) - 1;
+            if (dmy[3]) { const yr = Number(dmy[3]); y = yr < 100 ? 2000 + yr : yr; }
+            matched = true;
+          } else if (/hoje/i.test(s)) {
+            matched = true;
+          } else if (/amanh[ãa]/i.test(s)) {
+            const t = new Date(Date.UTC(y, mo, d + 1)); y = t.getUTCFullYear(); mo = t.getUTCMonth(); d = t.getUTCDate(); matched = true;
+          }
+          if (!matched && !hhmm) return null;
+          const utcMs = Date.UTC(y, mo, d, hour, minute) - tzOffsetMs;
+          return new Date(utcMs).toISOString();
+        }
+
+        const due_date = parseDate(fields.due ?? "");
+        const first_nudge_at = parseDate(fields.nudge ?? "") ?? due_date;
+
+        const repeatRaw = (fields.repeat ?? "").toLowerCase();
+        let nudge_repeat_hours = 0;
+        const repH = /(\d+)\s*h/.exec(repeatRaw);
+        const repMin = /(\d+)\s*m/.exec(repeatRaw);
+        const repD = /(\d+)\s*d/.exec(repeatRaw);
+        if (repH) nudge_repeat_hours = Number(repH[1]);
+        else if (repMin) nudge_repeat_hours = Math.max(1, Math.round(Number(repMin[1]) / 60));
+        else if (repD) nudge_repeat_hours = Number(repD[1]) * 24;
+        const nudge_active = Boolean(first_nudge_at);
+
+        let assigneeName = settingsGia["owner_name"] || "Eu";
+        let assigneePhone = normalizePhone(ownerPhone);
+        let groupName = "";
+        let resolveNote = "";
+        const assigneeRaw = (fields.assignee ?? "").trim();
+        if (assigneeRaw) {
+          const onlyDigits = normalizePhone(assigneeRaw);
+          const looksLikePhone = onlyDigits.length >= 10 && /^[0-9+\s\-\(\)]+$/.test(assigneeRaw);
+          if (looksLikePhone) {
+            const { data: byPhone } = await supabase
+              .from("contacts")
+              .select("id, name, phone, country_code, is_group, remote_jid")
+              .eq("active", true);
+            const found = (byPhone ?? []).find((c) =>
+              phonesMatch(`${c.country_code ?? ""}${c.phone ?? ""}`, onlyDigits) ||
+              phonesMatch(String(c.phone ?? ""), onlyDigits)
+            );
+            if (found) {
+              assigneeName = found.name;
+              assigneePhone = found.is_group ? String(found.remote_jid ?? "") : normalizePhone(`${found.country_code ?? ""}${found.phone ?? ""}`);
+              if (found.is_group) groupName = found.name;
+            } else {
+              assigneeName = assigneeRaw;
+              assigneePhone = onlyDigits;
+              resolveNote = " (contato novo, criado pelo número)";
+            }
+          } else {
+            const { data: byName } = await supabase
+              .from("contacts")
+              .select("id, name, phone, country_code, is_group, remote_jid")
+              .eq("active", true)
+              .ilike("name", `%${assigneeRaw}%`)
+              .limit(5);
+            if (byName && byName.length === 1) {
+              const c = byName[0];
+              assigneeName = c.name;
+              assigneePhone = c.is_group ? String(c.remote_jid ?? "") : normalizePhone(`${c.country_code ?? ""}${c.phone ?? ""}`);
+              if (c.is_group) groupName = c.name;
+            } else if (byName && byName.length > 1) {
+              const exact = byName.find((c) => c.name.toLowerCase() === assigneeRaw.toLowerCase());
+              if (exact) {
+                assigneeName = exact.name;
+                assigneePhone = exact.is_group ? String(exact.remote_jid ?? "") : normalizePhone(`${exact.country_code ?? ""}${exact.phone ?? ""}`);
+                if (exact.is_group) groupName = exact.name;
+              } else {
+                resolveNote = ` (atribuído a você porque havia múltiplos contatos com "${assigneeRaw}": ${byName.map((c) => c.name).join(", ")})`;
+              }
+            } else {
+              resolveNote = ` (contato "${assigneeRaw}" não encontrado, atribuído a você)`;
+            }
+          }
+        }
 
         const { data: created } = await supabase
           .from("tasks")
           .insert({
             title,
             description,
-            assignee_name: ownerName,
-            assignee_phone: normalizePhone(ownerPhone),
-            group_name: "",
+            assignee_name: assigneeName,
+            assignee_phone: assigneePhone,
+            group_name: groupName,
             status: "pending",
-            priority: "medium",
-            due_date: null,
-            recurrence: "none",
-            recurrence_interval: 1,
-            first_nudge_at: null,
-            nudge_repeat_hours: 0,
-            nudge_active: false,
+            priority,
+            due_date,
+            recurrence,
+            recurrence_interval: recurrenceInterval,
+            first_nudge_at,
+            nudge_repeat_hours,
+            nudge_active,
           })
           .select()
           .maybeSingle();
@@ -211,20 +352,35 @@ Deno.serve(async (req: Request) => {
         const autoReplyGia = settingsGia["ai_auto_reply"] !== "false";
         if (autoReplyGia && apiUrlGia && apiKeyGia && instanceGia) {
           const numberGia = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
-          const code = created?.task_code ? ` (${created.task_code})` : "";
+          const code = created?.task_code ? ` ${created.task_code}` : "";
+          const fmtDate = (iso: string | null) => {
+            if (!iso) return "—";
+            const dt = new Date(iso);
+            const br = new Date(dt.getTime() - 3 * 60 * 60 * 1000);
+            const dd = String(br.getUTCDate()).padStart(2, "0");
+            const mm = String(br.getUTCMonth() + 1).padStart(2, "0");
+            const hh = String(br.getUTCHours()).padStart(2, "0");
+            const mi = String(br.getUTCMinutes()).padStart(2, "0");
+            return `${dd}/${mm} ${hh}:${mi}`;
+          };
+          const summary =
+            `Tarefa criada${code}\n` +
+            `Título: ${title}\n` +
+            `Para: ${assigneeName}${resolveNote}\n` +
+            `Prioridade: ${priority === "high" ? "alta" : priority === "low" ? "baixa" : "média"}\n` +
+            `Prazo: ${fmtDate(due_date)}\n` +
+            `Recorrência: ${recurrence === "none" ? "nenhuma" : recurrence}${recurrence !== "none" && recurrenceInterval > 1 ? ` x${recurrenceInterval}` : ""}\n` +
+            `Cobrança: ${fmtDate(first_nudge_at)}${nudge_repeat_hours > 0 ? ` (repete a cada ${nudge_repeat_hours}h)` : ""}`;
           await fetch(`${apiUrlGia}/message/sendText/${instanceGia}`, {
             method: "POST",
             headers: { "Content-Type": "application/json", apikey: apiKeyGia },
-            body: JSON.stringify({
-              number: numberGia,
-              text: `Tarefa criada${code}: "${title}".`,
-            }),
+            body: JSON.stringify({ number: numberGia, text: summary }),
           });
         }
 
         await logEvent("gia-task-created", String(created?.id ?? ""));
         return new Response(
-          JSON.stringify({ created: true, task_id: created?.id, title }),
+          JSON.stringify({ created: true, task_id: created?.id, title, assignee: assigneeName }),
           { headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       }
