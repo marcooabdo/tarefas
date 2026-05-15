@@ -67,9 +67,11 @@ Deno.serve(async (req: Request) => {
         dueLabel = diffDays <= 0 ? "vence hoje" : `está ${diffDays} dia(s) atrasada`;
       }
       const firstName = (task.assignee_name ?? "").split(" ")[0] || "time";
+      const descriptionText = task.description ? `\nDetalhes: ${task.description}` : "";
       const fallbackMessage =
-        `Olá ${firstName}! Aqui é a GIA, Executive Advisor do Sr. Marco Abdo. ` +
-        `A tarefa *"${task.title}"* ${dueLabel}.\n\n` +
+        `Olá ${firstName}! Aqui é a GIA, Executive Advisor do Sr. Marco Abdo.\n\n` +
+        `Preciso de uma atualização sobre: *"${task.title}"*${descriptionText}\n` +
+        `Prazo: ${dueLabel}.\n\n` +
         `Responda apenas com o número:\n` +
         `1 - Concluída\n` +
         `2 - Em execução\n` +
@@ -82,10 +84,13 @@ Deno.serve(async (req: Request) => {
             `Gere a mensagem de cobrança proativa da seguinte tarefa para envio no WhatsApp.\n` +
             `Responsável: ${task.assignee_name}\n` +
             `Tarefa: ${task.title}\n` +
-            `Descrição: ${task.description ?? "—"}\n` +
+            `Descrição completa: ${task.description || "Nenhuma descrição adicional"}\n` +
             `Status do prazo: ${dueLabel}\n` +
             `Referência: ${task.task_code ?? "—"}\n\n` +
-            `A mensagem DEVE incluir explicitamente, em uma única seção:\n` +
+            `INSTRUÇÕES OBRIGATÓRIAS:\n` +
+            `- Explique claramente para a pessoa O QUE é a tarefa usando o título e a descrição fornecidos.\n` +
+            `- Contextualize o que precisa ser feito de forma objetiva para que a pessoa entenda exatamente do que se trata.\n` +
+            `- A mensagem DEVE incluir explicitamente as opções de resposta:\n` +
             `1 - Concluída\n2 - Em execução\n3 - Bloqueada\n\n` +
             `Termine com "Ref: ${task.task_code ?? "—"}". Não inclua nada além da mensagem final.`;
           const aiRes = await fetch("https://api.openai.com/v1/chat/completions", {
