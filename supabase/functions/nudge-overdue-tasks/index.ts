@@ -108,7 +108,8 @@ Deno.serve(async (req: Request) => {
         } catch { /* fallback */ }
       }
       const isGroup = String(task.assignee_phone).includes("@g.us");
-      const number = isGroup ? task.assignee_phone : String(task.assignee_phone).replace(/\D/g, "");
+      let number = isGroup ? task.assignee_phone : String(task.assignee_phone).replace(/\D/g, "");
+      if (!isGroup && number.length <= 11) number = "55" + number;
 
       try {
         const r = await fetch(`${apiUrl}/message/sendText/${instanceName}`, {
@@ -129,14 +130,22 @@ Deno.serve(async (req: Request) => {
           sent_at: new Date().toISOString(),
         });
 
+        const isSingle = !task.nudge_repeat_hours || task.nudge_repeat_hours <= 0;
         if (ok) {
-          const isSingle = !task.nudge_repeat_hours || task.nudge_repeat_hours <= 0;
           await supabase
             .from("tasks")
             .update({
               ai_interventions: (task.ai_interventions ?? 0) + 1,
               last_ai_nudge: new Date().toISOString(),
               status: task.status === "completed" ? "completed" : "awaiting_response",
+              nudge_active: !isSingle,
+            })
+            .eq("id", task.id);
+        } else {
+          await supabase
+            .from("tasks")
+            .update({
+              last_ai_nudge: new Date().toISOString(),
               nudge_active: !isSingle,
             })
             .eq("id", task.id);

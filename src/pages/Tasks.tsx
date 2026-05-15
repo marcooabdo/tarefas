@@ -190,6 +190,7 @@ export function Tasks() {
           first_nudge_at: firstNudge,
           nudge_repeat_hours: draft.nudge_repeat_hours,
           nudge_active: !!firstNudge,
+          last_ai_nudge: null,
         })
         .eq('id', editingId);
     } else {
