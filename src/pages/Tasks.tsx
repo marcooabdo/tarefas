@@ -41,6 +41,8 @@ interface Draft {
   recurrence_interval: number;
   first_nudge_at: string;
   nudge_repeat_hours: number;
+  assignee_name: string;
+  assignee_phone: string;
 }
 
 function defaultFirstNudge(): string {
@@ -61,6 +63,8 @@ const emptyDraft: Draft = {
   recurrence_interval: 1,
   first_nudge_at: '',
   nudge_repeat_hours: 0,
+  assignee_name: '',
+  assignee_phone: '',
 };
 
 const RECURRENCE_LABEL: Record<TaskRecurrence, string> = {
@@ -130,6 +134,8 @@ export function Tasks() {
       recurrence_interval: t.recurrence_interval ?? 1,
       first_nudge_at: toLocalInput(t.first_nudge_at),
       nudge_repeat_hours: t.nudge_repeat_hours ?? 0,
+      assignee_name: t.assignee_name ?? '',
+      assignee_phone: t.assignee_phone ?? '',
     });
     setRecipientSearch('');
     setRecipientFilter('all');
@@ -174,6 +180,8 @@ export function Tasks() {
         .update({
           title: draft.title,
           description: draft.description,
+          assignee_name: draft.assignee_name,
+          assignee_phone: draft.assignee_phone,
           status: draft.status,
           priority: draft.priority,
           due_date: due,
@@ -560,6 +568,28 @@ export function Tasks() {
                   placeholder="Contexto ou detalhes da tarefa"
                 />
               </Field>
+
+              {editingId && (
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                  <Field label="Responsável" hint="Nome do destinatário da cobrança">
+                    <input
+                      className="nx-input"
+                      value={draft.assignee_name}
+                      onChange={(e) => setDraft({ ...draft, assignee_name: e.target.value })}
+                      placeholder="Ex: João Silva"
+                    />
+                  </Field>
+                  <Field label="WhatsApp" hint="Número com código do país (ex: 5534999990000)">
+                    <input
+                      className="nx-input"
+                      type="tel"
+                      value={draft.assignee_phone}
+                      onChange={(e) => setDraft({ ...draft, assignee_phone: e.target.value.replace(/\D/g, '') })}
+                      placeholder="5534999990000"
+                    />
+                  </Field>
+                </div>
+              )}
 
               {!editingId && (
               <div>
