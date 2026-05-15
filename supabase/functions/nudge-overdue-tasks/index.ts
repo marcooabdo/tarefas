@@ -145,8 +145,61 @@ Deno.serve(async (req: Request) => {
       }
     }
 
+    // Send consolidated overdue report to GIA admin number
+    const reportPhone = settings["gia_report_phone"];
+    let reportSent = false;
+    if (reportPhone && due_now.length > 0) {
+      const pad2 = (n: number) => String(n).padStart(2, "0");
+      const fmtDate = (iso: string) => {
+        const d = new Date(iso);
+        return `${pad2(d.getDate())}/${pad2(d.getMonth() + 1)} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+      };
+      const nowStr = fmtDate(new Date().toISOString());
+      const lines: string[] = [
+        `*RELATORIO DE TAREFAS VENCIDAS*`,
+        `Data: ${nowStr}`,
+        `Total: ${due_now.length} tarefa(s) cobrada(s) agora`,
+        ``,
+        `---`,
+      ];
+      for (const t of due_now) {
+        const assignee = t.assignee_name || "Sem responsavel";
+        const phone = t.assignee_phone || "—";
+        const dueStr = t.due_date ? fmtDate(t.due_date) : "—";
+        const code = t.task_code || "—";
+        lines.push(``);
+        lines.push(`*${t.title}*`);
+        lines.push(`Ref: ${code}`);
+        lines.push(`Responsavel: ${assignee} (${phone})`);
+        lines.push(`Prazo: ${dueStr}`);
+      }
+      lines.push(``);
+      lines.push(`---`);
+      lines.push(`_Relatorio gerado automaticamente pela GIA._`);
+
+      const reportMsg = lines.join("\n");
+      const reportNumber = String(reportPhone).replace(/\D/g, "");
+      try {
+        const rr = await fetch(`${apiUrl}/message/sendText/${instanceName}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", apikey: apiKey },
+          body: JSON.stringify({ number: reportNumber, text: reportMsg }),
+        });
+        reportSent = rr.ok;
+        await supabase.from("send_logs").insert({
+          contact_name: "GIA Admin",
+          contact_phone: reportPhone,
+          template_name: "Relatorio tarefas vencidas",
+          message_content: reportMsg,
+          status: rr.ok ? "sent" : "error",
+          error_message: rr.ok ? null : await rr.text(),
+          sent_at: new Date().toISOString(),
+        });
+      } catch { /* best effort */ }
+    }
+
     return new Response(
-      JSON.stringify({ processed: results.length, results }),
+      JSON.stringify({ processed: results.length, results, report_sent: reportSent }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (err) {

@@ -19,11 +19,14 @@ const priorityLabel: Record<TaskPriority, string> = {
 function formatDue(iso: string | null) {
   if (!iso) return 'Sem prazo';
   const d = new Date(iso);
-  const diffDays = Math.ceil((d.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
-  if (diffDays < 0) return `${Math.abs(diffDays)}d atrasada`;
-  if (diffDays === 0) return 'Hoje';
-  if (diffDays === 1) return 'Amanhã';
-  return `em ${diffDays}d`;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const diffMs = d.getTime() - Date.now();
+  const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+  if (diffDays < 0) return `${Math.abs(diffDays)}d atrasada (${time})`;
+  if (diffDays === 0) return `Hoje ${time}`;
+  if (diffDays === 1) return `Amanhã ${time}`;
+  return `em ${diffDays}d (${time})`;
 }
 
 function isOverdue(t: Task) {
@@ -118,17 +121,12 @@ export function Tasks() {
       const d = new Date(iso);
       return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
     };
-    const toLocalDate = (iso: string | null) => {
-      if (!iso) return '';
-      const d = new Date(iso);
-      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-    };
     setDraft({
       title: t.title,
       description: t.description ?? '',
       status: t.status,
       priority: t.priority,
-      due_date: toLocalDate(t.due_date),
+      due_date: toLocalInput(t.due_date),
       recipient_ids: [],
       recurrence: t.recurrence,
       recurrence_interval: t.recurrence_interval ?? 1,
@@ -846,9 +844,9 @@ export function Tasks() {
                     <option value="low" style={{ background: '#0e1016' }}>Baixa</option>
                   </select>
                 </Field>
-                <Field label="Prazo">
+                <Field label="Prazo (data e hora)">
                   <input
-                    type="date"
+                    type="datetime-local"
                     className="nx-input"
                     value={draft.due_date}
                     onChange={(e) => setDraft({ ...draft, due_date: e.target.value })}

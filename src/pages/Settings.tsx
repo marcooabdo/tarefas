@@ -6,6 +6,7 @@ interface SettingsState {
   evolution_api_url: string;
   evolution_api_key: string;
   evolution_instance_name: string;
+  gia_report_phone: string;
 }
 
 export function Settings() {
@@ -13,6 +14,7 @@ export function Settings() {
     evolution_api_url: '',
     evolution_api_key: '',
     evolution_instance_name: '',
+    gia_report_phone: '',
   });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -40,13 +42,14 @@ export function Settings() {
     const { data } = await supabase
       .from('app_settings')
       .select('key, value')
-      .in('key', ['evolution_api_url', 'evolution_api_key', 'evolution_instance_name']);
+      .in('key', ['evolution_api_url', 'evolution_api_key', 'evolution_instance_name', 'gia_report_phone']);
     const map: Record<string, string> = {};
     (data ?? []).forEach((s: any) => (map[s.key] = s.value));
     setSettings({
       evolution_api_url: map.evolution_api_url ?? '',
       evolution_api_key: map.evolution_api_key ?? '',
       evolution_instance_name: map.evolution_instance_name ?? '',
+      gia_report_phone: map.gia_report_phone ?? '',
     });
     setLoading(false);
   }
@@ -317,6 +320,16 @@ export function Settings() {
                   placeholder="minha-instancia"
                   value={settings.evolution_instance_name}
                   onChange={(e) => setSettings({ ...settings, evolution_instance_name: e.target.value })}
+                />
+              </Field>
+
+              <Field label="WhatsApp para Relatórios (GIA)" hint="Número que recebe o relatório de tarefas vencidas (ex: 5534999990000)">
+                <input
+                  className="nx-input"
+                  type="tel"
+                  placeholder="5534999990000"
+                  value={settings.gia_report_phone}
+                  onChange={(e) => setSettings({ ...settings, gia_report_phone: e.target.value.replace(/\D/g, '') })}
                 />
               </Field>
             </div>
