@@ -570,24 +570,124 @@ export function Tasks() {
               </Field>
 
               {editingId && (
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-                  <Field label="Responsável" hint="Nome do destinatário da cobrança">
+                <div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '12px' }}>
+                    <Field label="Responsável" hint="Preencha manualmente ou selecione da lista abaixo">
+                      <input
+                        className="nx-input"
+                        value={draft.assignee_name}
+                        onChange={(e) => setDraft({ ...draft, assignee_name: e.target.value })}
+                        placeholder="Ex: João Silva"
+                      />
+                    </Field>
+                    <Field label="WhatsApp" hint="Número com código do país (ex: 5534999990000)">
+                      <input
+                        className="nx-input"
+                        type="tel"
+                        value={draft.assignee_phone}
+                        onChange={(e) => setDraft({ ...draft, assignee_phone: e.target.value.replace(/\D/g, '') })}
+                        placeholder="5534999990000"
+                      />
+                    </Field>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                    <span style={{ fontSize: '11px', color: '#9aa3b2', fontWeight: 600, letterSpacing: '0.4px', textTransform: 'uppercase' }}>
+                      Selecionar da lista de contatos
+                    </span>
+                    <div style={{ display: 'flex', gap: '5px' }}>
+                      {(['all', 'contacts', 'groups'] as const).map((f) => {
+                        const active = recipientFilter === f;
+                        return (
+                          <button
+                            key={f}
+                            type="button"
+                            onClick={() => setRecipientFilter(f)}
+                            style={{
+                              padding: '4px 10px', borderRadius: '16px',
+                              border: `1px solid ${active ? 'rgba(0,229,255,0.5)' : 'rgba(255,255,255,0.08)'}`,
+                              background: active ? 'rgba(0,229,255,0.12)' : 'transparent',
+                              color: active ? '#00e5ff' : '#9aa3b2',
+                              fontSize: '10.5px', fontWeight: 600, cursor: 'pointer',
+                            }}
+                          >
+                            {f === 'all' ? 'Todos' : f === 'groups' ? 'Grupos' : 'Contatos'}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <div style={{ position: 'relative', marginBottom: '8px' }}>
+                    <Search size={13} color="#6b7384" style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)' }} />
                     <input
                       className="nx-input"
-                      value={draft.assignee_name}
-                      onChange={(e) => setDraft({ ...draft, assignee_name: e.target.value })}
-                      placeholder="Ex: João Silva"
+                      placeholder="Buscar contato, grupo, telefone ou setor..."
+                      value={recipientSearch}
+                      onChange={(e) => setRecipientSearch(e.target.value)}
+                      style={{ paddingLeft: '34px' }}
                     />
-                  </Field>
-                  <Field label="WhatsApp" hint="Número com código do país (ex: 5534999990000)">
-                    <input
-                      className="nx-input"
-                      type="tel"
-                      value={draft.assignee_phone}
-                      onChange={(e) => setDraft({ ...draft, assignee_phone: e.target.value.replace(/\D/g, '') })}
-                      placeholder="5534999990000"
-                    />
-                  </Field>
+                  </div>
+                  <div style={{
+                    border: '1px solid rgba(255,255,255,0.08)', borderRadius: '10px',
+                    maxHeight: '180px', overflowY: 'auto', background: 'rgba(0,0,0,0.2)',
+                  }}>
+                    {filteredContactList.length === 0 ? (
+                      <div style={{ padding: '20px', color: '#6b7384', fontSize: '12.5px', textAlign: 'center' }}>
+                        Nenhum resultado.
+                      </div>
+                    ) : (
+                      filteredContactList.map((c, idx) => {
+                        const isSelected = draft.assignee_phone === c.phone && draft.assignee_name === c.name;
+                        return (
+                          <div
+                            key={c.id}
+                            onClick={() => setDraft({ ...draft, assignee_name: c.name, assignee_phone: c.phone })}
+                            style={{
+                              display: 'flex', alignItems: 'center', gap: '12px',
+                              padding: '10px 14px',
+                              borderTop: idx === 0 ? 'none' : '1px solid rgba(255,255,255,0.04)',
+                              cursor: 'pointer',
+                              background: isSelected ? 'rgba(0,229,255,0.06)' : 'transparent',
+                            }}
+                          >
+                            <span style={{
+                              width: '18px', height: '18px', borderRadius: '5px',
+                              border: `1px solid ${isSelected ? '#00e5ff' : 'rgba(255,255,255,0.2)'}`,
+                              background: isSelected ? '#00e5ff' : 'transparent',
+                              display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+                            }}>
+                              {isSelected && <Check size={12} color="#07080c" strokeWidth={3} />}
+                            </span>
+                            <div style={{
+                              width: '32px', height: '32px', borderRadius: '50%',
+                              background: c.is_group
+                                ? 'linear-gradient(135deg, rgba(16,245,155,0.2), rgba(0,229,255,0.2))'
+                                : 'linear-gradient(135deg, rgba(0,229,255,0.2), rgba(179,71,255,0.2))',
+                              border: `1px solid ${c.is_group ? 'rgba(16,245,155,0.3)' : 'rgba(0,229,255,0.3)'}`,
+                              display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+                              color: c.is_group ? '#10f59b' : '#00e5ff', fontWeight: 700, fontSize: '12px',
+                            }}>
+                              {c.is_group ? <Users2 size={13} /> : c.name.charAt(0).toUpperCase()}
+                            </div>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ fontSize: '13px', fontWeight: 600, color: '#f4f6fb', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                {c.name}
+                                {c.is_group && (
+                                  <span style={{ fontSize: '9px', color: '#10f59b', fontWeight: 700, padding: '1px 5px', borderRadius: '4px', background: 'rgba(16,245,155,0.1)', border: '1px solid rgba(16,245,155,0.3)' }}>GRUPO</span>
+                                )}
+                              </div>
+                              <div style={{ fontSize: '11px', color: '#6b7384', fontFamily: 'monospace' }}>
+                                {c.is_group ? (c.remote_jid ?? '') : (c.phone || '—')}
+                                {!c.is_group && c.department && <span style={{ fontFamily: 'inherit', color: '#9aa3b2' }}> · {c.department}</span>}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                  <div style={{ fontSize: '11px', color: '#6b7384', marginTop: '6px' }}>
+                    Clique em um contato para preencher o responsável e número, ou edite manualmente acima.
+                  </div>
                 </div>
               )}
 
