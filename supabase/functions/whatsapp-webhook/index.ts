@@ -104,6 +104,124 @@ function replyFor(intent: Intent, name: string, title: string): string {
   }
 }
 
+interface Candidate {
+  remote_jid: string;
+  name: string;
+  phone: string;
+  is_group: boolean;
+}
+
+async function searchWhatsAppChats(settings: Record<string, string>, query: string): Promise<Candidate[]> {
+  const apiUrl = settings["evolution_api_url"]?.replace(/\/$/, "");
+  const apiKey = settings["evolution_api_key"];
+  const instance = settings["evolution_instance_name"];
+  if (!apiUrl || !apiKey || !instance) return [];
+
+  const headers = { apikey: apiKey, "Content-Type": "application/json" };
+  const queryLower = query.toLowerCase();
+
+  let chats: Array<{ remoteJid?: string; id?: string; pushName?: string; name?: string; subject?: string }> = [];
+  const chatEndpoints = [
+    `${apiUrl}/chat/findChats/${instance}`,
+    `${apiUrl}/chat/fetchChats/${instance}`,
+  ];
+  for (const ep of chatEndpoints) {
+    try {
+      const r = await fetch(ep, { method: "POST", headers, body: JSON.stringify({}) });
+      if (r.ok) {
+        const j = await r.json();
+        chats = Array.isArray(j) ? j : (j.chats ?? j.data ?? []);
+        if (chats.length) break;
+      }
+    } catch { /* try next */ }
+  }
+
+  let contacts: Array<{ remoteJid?: string; id?: string; pushName?: string; name?: string; notify?: string }> = [];
+  const contactEndpoints = [
+    `${apiUrl}/chat/findContacts/${instance}`,
+    `${apiUrl}/chat/fetchContacts/${instance}`,
+  ];
+  for (const ep of contactEndpoints) {
+    try {
+      const r = await fetch(ep, { method: "POST", headers, body: JSON.stringify({}) });
+      if (r.ok) {
+        const j = await r.json();
+        contacts = Array.isArray(j) ? j : (j.contacts ?? j.data ?? []);
+        if (contacts.length) break;
+      }
+    } catch { /* try next */ }
+  }
+
+  const candidates: Candidate[] = [];
+  const seen = new Set<string>();
+
+  for (const c of chats) {
+    const jid = c.remoteJid ?? c.id ?? "";
+    if (!jid || seen.has(jid) || jid.endsWith("@broadcast")) continue;
+    const isGroup = jid.endsWith("@g.us");
+    const name = c.subject ?? c.name ?? c.pushName ?? "";
+    if (!name) continue;
+    if (name.toLowerCase().includes(queryLower)) {
+      seen.add(jid);
+      const phone = isGroup ? "" : jid.split("@")[0].replace(/\D/g, "");
+      candidates.push({ remote_jid: jid, name, phone: isGroup ? "" : `+${phone}`, is_group: isGroup });
+    }
+  }
+
+  for (const c of contacts) {
+    const jid = c.remoteJid ?? c.id ?? "";
+    if (!jid || seen.has(jid) || jid.endsWith("@g.us") || jid.endsWith("@broadcast")) continue;
+    const name = c.pushName ?? c.name ?? c.notify ?? "";
+    if (!name) continue;
+    if (name.toLowerCase().includes(queryLower)) {
+      seen.add(jid);
+      const phone = jid.split("@")[0].replace(/\D/g, "");
+      candidates.push({ remote_jid: jid, name, phone: `+${phone}`, is_group: false });
+    }
+  }
+
+  return candidates.slice(0, 10);
+}
+
+async function askConfirmation(
+  supabase: ReturnType<typeof createClient>,
+  settings: Record<string, string>,
+  ownerJid: string,
+  searchTerm: string,
+  candidates: Candidate[],
+  taskDraft: Record<string, unknown>,
+): Promise<boolean> {
+  const apiUrl = settings["evolution_api_url"]?.replace(/\/$/, "");
+  const apiKey = settings["evolution_api_key"];
+  const instance = settings["evolution_instance_name"];
+  if (!apiUrl || !apiKey || !instance || candidates.length === 0) return false;
+
+  await supabase.from("pending_task_confirmations").insert({
+    owner_jid: ownerJid,
+    task_draft: taskDraft,
+    candidates,
+    status: "pending",
+  });
+
+  const lines = candidates.map((c, i) =>
+    `${i + 1} - ${c.name}${c.is_group ? " (grupo)" : ""}${c.phone ? ` ${c.phone}` : ""}`
+  );
+  const msg =
+    `Encontrei estes contatos/grupos para "${searchTerm}":\n\n` +
+    lines.join("\n") +
+    `\n\n0 - Nenhum desses (criar tarefa para mim mesmo)\n\n` +
+    `Responda com o número correspondente.`;
+
+  const number = ownerJid.endsWith("@g.us") ? ownerJid : normalizePhone(ownerJid.split("@")[0]);
+  await fetch(`${apiUrl}/message/sendText/${instance}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", apikey: apiKey },
+    body: JSON.stringify({ number, text: msg }),
+  });
+
+  return true;
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 200, headers: corsHeaders });
@@ -169,6 +287,106 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
+    // Handle pending confirmation responses (owner replying with a number)
+    const confirmNum = /^\s*(\d+)\s*$/.exec(text);
+    if (confirmNum && remoteJid) {
+      const { data: pending } = await supabase
+        .from("pending_task_confirmations")
+        .select("*")
+        .eq("owner_jid", remoteJid)
+        .eq("status", "pending")
+        .order("created_at", { ascending: false })
+        .limit(1);
+
+      if (pending && pending.length > 0) {
+        const confirmation = pending[0];
+        const choice = Number(confirmNum[1]);
+        const candidates = confirmation.candidates as Candidate[];
+        const draft = confirmation.task_draft as Record<string, unknown>;
+
+        const { data: settingsConf } = await supabase.from("app_settings").select("key, value");
+        const sConf: Record<string, string> = {};
+        for (const row of settingsConf ?? []) sConf[row.key] = row.value;
+
+        let assigneeName = sConf["owner_name"] || "Eu";
+        let assigneePhone = normalizePhone(sConf["owner_phone"] ?? "");
+        let groupName = "";
+
+        if (choice >= 1 && choice <= candidates.length) {
+          const chosen = candidates[choice - 1];
+          assigneeName = chosen.name;
+          assigneePhone = chosen.is_group ? chosen.remote_jid : normalizePhone(chosen.remote_jid.split("@")[0]);
+          groupName = chosen.is_group ? chosen.name : "";
+
+          // Import contact if not already in contacts table
+          const { data: existing } = await supabase
+            .from("contacts")
+            .select("id")
+            .eq("remote_jid", chosen.remote_jid)
+            .maybeSingle();
+          if (!existing) {
+            await supabase.from("contacts").insert({
+              name: chosen.name,
+              phone: chosen.is_group ? chosen.remote_jid : (chosen.phone || ""),
+              country_code: "+55",
+              department: chosen.is_group ? "Grupo" : "",
+              is_group: chosen.is_group,
+              remote_jid: chosen.remote_jid,
+              active: true,
+            });
+          }
+        }
+
+        const { data: created } = await supabase
+          .from("tasks")
+          .insert({
+            title: draft.title ?? "Tarefa sem título",
+            description: draft.description ?? "",
+            assignee_name: assigneeName,
+            assignee_phone: assigneePhone,
+            group_name: groupName,
+            status: "pending",
+            priority: draft.priority ?? "medium",
+            due_date: draft.due_date ?? null,
+            recurrence: draft.recurrence ?? "none",
+            recurrence_interval: draft.recurrence_interval ?? 1,
+            first_nudge_at: draft.first_nudge_at ?? null,
+            nudge_repeat_hours: draft.nudge_repeat_hours ?? 0,
+            nudge_active: draft.nudge_active ?? false,
+          })
+          .select()
+          .maybeSingle();
+
+        await supabase
+          .from("pending_task_confirmations")
+          .update({ status: "confirmed", resolved_at: new Date().toISOString() })
+          .eq("id", confirmation.id);
+
+        // Send confirmation reply
+        const apiUrlConf = sConf["evolution_api_url"]?.replace(/\/$/, "");
+        const apiKeyConf = sConf["evolution_api_key"];
+        const instanceConf = sConf["evolution_instance_name"];
+        if (apiUrlConf && apiKeyConf && instanceConf) {
+          const numberConf = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
+          const code = created?.task_code ? ` ${created.task_code}` : "";
+          const replyMsg = choice === 0
+            ? `Ok! Tarefa criada${code} e atribuída a você mesmo.`
+            : `Perfeito! Tarefa criada${code} para *${assigneeName}*${groupName ? " (grupo)" : ""}.`;
+          await fetch(`${apiUrlConf}/message/sendText/${instanceConf}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", apikey: apiKeyConf },
+            body: JSON.stringify({ number: numberConf, text: replyMsg }),
+          });
+        }
+
+        await logEvent("confirmation-resolved", `choice=${choice} task=${created?.id ?? ""}`);
+        return new Response(
+          JSON.stringify({ confirmed: true, choice, task_id: created?.id }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+    }
+
     const giaMatch = /^\s*GIA\s*:\s*([\s\S]+)$/i.exec(text);
     if (giaMatch && remoteJid) {
       const { data: settingsRowsGia } = await supabase.from("app_settings").select("key, value");
@@ -330,9 +548,40 @@ Deno.serve(async (req: Request) => {
                 }
                 if (exact.is_group) groupName = exact.name;
               } else {
+                const candidates = byName.map((c) => ({
+                  remote_jid: c.remote_jid ?? "",
+                  name: c.name,
+                  phone: c.phone ?? "",
+                  is_group: c.is_group ?? false,
+                }));
+                const confirmationNeeded = await askConfirmation(
+                  supabase, settingsGia, remoteJid, assigneeRaw, candidates,
+                  { title, description, priority, due_date, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: first_nudge_at, nudge_repeat_hours, nudge_active }
+                );
+                if (confirmationNeeded) {
+                  await logEvent("gia-awaiting-confirmation", `assignee="${assigneeRaw}" candidates=${candidates.length}`);
+                  return new Response(
+                    JSON.stringify({ awaiting_confirmation: true, assignee: assigneeRaw }),
+                    { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+                  );
+                }
                 resolveNote = ` (atribuído a você porque havia múltiplos contatos com "${assigneeRaw}": ${byName.map((c) => c.name).join(", ")})`;
               }
             } else {
+              const whatsappCandidates = await searchWhatsAppChats(settingsGia, assigneeRaw);
+              if (whatsappCandidates.length > 0) {
+                const confirmationNeeded = await askConfirmation(
+                  supabase, settingsGia, remoteJid, assigneeRaw, whatsappCandidates,
+                  { title, description, priority, due_date, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: first_nudge_at, nudge_repeat_hours, nudge_active }
+                );
+                if (confirmationNeeded) {
+                  await logEvent("gia-awaiting-confirmation", `assignee="${assigneeRaw}" candidates=${whatsappCandidates.length}`);
+                  return new Response(
+                    JSON.stringify({ awaiting_confirmation: true, assignee: assigneeRaw }),
+                    { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+                  );
+                }
+              }
               resolveNote = ` (contato "${assigneeRaw}" não encontrado, atribuído a você)`;
             }
           }
