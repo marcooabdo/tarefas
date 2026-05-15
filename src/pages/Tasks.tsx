@@ -21,8 +21,10 @@ function formatDue(iso: string | null) {
   const d = new Date(iso);
   const pad = (n: number) => String(n).padStart(2, '0');
   const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  const diffMs = d.getTime() - Date.now();
-  const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+  const now = new Date();
+  const dueDay = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const diffDays = Math.round((dueDay.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
   if (diffDays < 0) return `${Math.abs(diffDays)}d atrasada (${time})`;
   if (diffDays === 0) return `Hoje ${time}`;
   if (diffDays === 1) return `Amanhã ${time}`;

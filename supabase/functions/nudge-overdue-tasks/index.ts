@@ -60,7 +60,10 @@ Deno.serve(async (req: Request) => {
       let dueLabel = "sem prazo";
       if (task.due_date) {
         const due = new Date(task.due_date);
-        const diffDays = Math.ceil((Date.now() - due.getTime()) / (1000 * 60 * 60 * 24));
+        const nowDate = new Date();
+        const dueDay = new Date(due.getFullYear(), due.getMonth(), due.getDate());
+        const todayDay = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate());
+        const diffDays = Math.round((todayDay.getTime() - dueDay.getTime()) / (1000 * 60 * 60 * 24));
         dueLabel = diffDays <= 0 ? "vence hoje" : `está ${diffDays} dia(s) atrasada`;
       }
       const firstName = (task.assignee_name ?? "").split(" ")[0] || "time";
