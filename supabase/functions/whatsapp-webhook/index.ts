@@ -1129,7 +1129,8 @@ REGRAS:
           const todayISO = nowBR.toISOString().slice(0, 10);
           const dayNames = ["domingo", "segunda-feira", "terca-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sabado"];
           const todayDayName = dayNames[nowBR.getUTCDay()];
-          const ownerName = sNL["owner_name"] || "o gestor";
+          const rawOwnerName = sNL["owner_name"] ?? "";
+          const ownerName = (rawOwnerName && rawOwnerName.toLowerCase() !== "eu") ? rawOwnerName : "Marco Abdo";
 
           const parsePrompt = `Voce e a GIA, assistente executiva. O gestor enviou este comando por WhatsApp em linguagem natural. Extraia as informacoes estruturadas.
 
@@ -1156,7 +1157,7 @@ Responda APENAS com JSON valido (sem markdown, sem crase), com estes campos:
 REGRAS:
 - Se o gestor quer ENVIAR uma mensagem (perguntar algo, pedir algo, avisar), o proposed_message deve ser essa mensagem escrita de forma profissional e cordial
 - Se o gestor quer COBRAR algo, nudge=true e a instrucao deve refletir o tom (firme, educado, etc)
-- O proposed_message deve ser escrito na primeira pessoa como assistente do gestor (Ex: "Ola! Aqui e a GIA, assistente do Sr. ${ownerName}. Ele gostaria de saber...")
+- O proposed_message deve ser escrito na primeira pessoa como a GIA (Ex: "Ola! Aqui e a GIA, Executive Advisor do Sr. ${ownerName}. Ele gostaria de saber...")
 - Se nao ha destinatario claro, deixe assignee vazio
 - Se o gestor menciona dia da semana (ex: "na segunda-feira"), calcule a data ISO correta a partir de hoje ${todayISO}
 - Se o gestor menciona horario (ex: "08:30hr"), inclua no due_date_iso
