@@ -87,6 +87,7 @@ export interface Task {
   first_nudge_at: string | null;
   nudge_repeat_hours: number;
   nudge_active: boolean;
+  gia_instruction: string;
   created_at: string;
   updated_at: string;
 }

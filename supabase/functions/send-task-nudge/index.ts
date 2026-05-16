@@ -71,33 +71,61 @@ Deno.serve(async (req: Request) => {
       else dueLabel = `vence em ${Math.abs(diffDays)} dia(s)`;
     }
 
+    const giaInstruction = (task.gia_instruction ?? "").trim();
+    const isSendOnly = giaInstruction && /\b(s[oó]\s*(envi|mand)|apenas\s*(envi|mand)|sem\s*(pedir|cobrar)|n[aã]o\s*(pe[cç]a|cobr|pedir)|marque\s*como\s*conclu)/i.test(giaInstruction);
+
     const descriptionText = task.description ? `\nDetalhes: ${task.description}` : "";
-    const fallbackMessage =
-      `Olá ${task.assignee_name}! Aqui é a GIA, Executive Advisor do Sr. Marco Abdo.\n\n` +
-      `Preciso de uma atualização sobre: *"${task.title}"*${descriptionText}\n` +
-      `Prazo: ${dueLabel}.\n\n` +
-      `Responda apenas com o número correspondente:\n` +
-      `1 - Concluída\n` +
-      `2 - Em execução\n` +
-      `3 - Bloqueada\n\n` +
-      `Ref: ${task.task_code ?? "—"}`;
+
+    let fallbackMessage: string;
+    if (isSendOnly) {
+      fallbackMessage =
+        `Olá ${task.assignee_name}! Aqui é a GIA, assistente do Sr. Marco Abdo.\n\n` +
+        `${task.title}${descriptionText ? "\n" + task.description : ""}`;
+    } else {
+      fallbackMessage =
+        `Olá ${task.assignee_name}! Aqui é a GIA, Executive Advisor do Sr. Marco Abdo.\n\n` +
+        `Preciso de uma atualização sobre: *"${task.title}"*${descriptionText}\n` +
+        `Prazo: ${dueLabel}.\n\n` +
+        `Responda apenas com o número correspondente:\n` +
+        `1 - Concluída\n` +
+        `2 - Em execução\n` +
+        `3 - Bloqueada\n\n` +
+        `Ref: ${task.task_code ?? "—"}`;
+    }
 
     let message = fallbackMessage;
     if (openaiKey) {
       try {
-        const userBrief =
-          `Gere a mensagem de cobrança da seguinte tarefa para envio no WhatsApp.\n` +
-          `Responsável: ${task.assignee_name}\n` +
-          `Tarefa: ${task.title}\n` +
-          `Descrição completa: ${task.description || "Nenhuma descrição adicional"}\n` +
-          `Prazo: ${dueLabel}\n` +
-          `Referência: ${task.task_code ?? "—"}\n\n` +
-          `INSTRUÇÕES OBRIGATÓRIAS:\n` +
-          `- Explique claramente para a pessoa O QUE é a tarefa usando o título e a descrição fornecidos.\n` +
-          `- Contextualize o que precisa ser feito de forma objetiva para que a pessoa entenda exatamente do que se trata.\n` +
-          `- A mensagem DEVE incluir explicitamente as opções de resposta:\n` +
-          `1 - Concluída\n2 - Em execução\n3 - Bloqueada\n\n` +
-          `Termine com "Ref: ${task.task_code ?? "—"}". Não inclua nada além da mensagem final.`;
+        let userBrief: string;
+        if (isSendOnly) {
+          userBrief =
+            `Gere uma mensagem para envio no WhatsApp seguindo estas instruções do meu chefe:\n\n` +
+            `INSTRUÇÃO: ${giaInstruction}\n\n` +
+            `Destinatário: ${task.assignee_name}\n` +
+            `Título/Assunto: ${task.title}\n` +
+            `Descrição/Contexto: ${task.description || "Nenhuma descrição adicional"}\n\n` +
+            `REGRAS:\n` +
+            `- Siga EXATAMENTE a instrução acima. Não peça status, não peça resposta numerada (1, 2, 3).\n` +
+            `- Seja cordial e natural como uma assistente executiva.\n` +
+            `- Não mencione "tarefa", "prazo", "cobrança" ou "pendência".\n` +
+            `- Apenas envie a mensagem conforme solicitado, como se fosse uma assistente real do Marco.\n` +
+            `- Não inclua referência de tarefa. Seja breve e humana.`;
+        } else {
+          userBrief =
+            `Gere a mensagem de cobrança da seguinte tarefa para envio no WhatsApp.\n` +
+            `Responsável: ${task.assignee_name}\n` +
+            `Tarefa: ${task.title}\n` +
+            `Descrição completa: ${task.description || "Nenhuma descrição adicional"}\n` +
+            `Prazo: ${dueLabel}\n` +
+            `Referência: ${task.task_code ?? "—"}\n` +
+            (giaInstruction ? `\nInstrução adicional do gestor: ${giaInstruction}\n` : "") +
+            `\nINSTRUÇÕES OBRIGATÓRIAS:\n` +
+            `- Explique claramente para a pessoa O QUE é a tarefa usando o título e a descrição fornecidos.\n` +
+            `- Contextualize o que precisa ser feito de forma objetiva para que a pessoa entenda exatamente do que se trata.\n` +
+            `- A mensagem DEVE incluir explicitamente as opções de resposta:\n` +
+            `1 - Concluída\n2 - Em execução\n3 - Bloqueada\n\n` +
+            `Termine com "Ref: ${task.task_code ?? "—"}". Não inclua nada além da mensagem final.`;
+        }
         const aiRes = await fetch("https://api.openai.com/v1/chat/completions", {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${openaiKey}` },
@@ -153,14 +181,16 @@ Deno.serve(async (req: Request) => {
     });
 
     if (status === "sent") {
-      await supabase
-        .from("tasks")
-        .update({
-          ai_interventions: (task.ai_interventions ?? 0) + 1,
-          last_ai_nudge: now,
-          status: task.status === "completed" ? "completed" : "awaiting_response",
-        })
-        .eq("id", taskId);
+      const newStatus = isSendOnly
+        ? "completed"
+        : task.status === "completed" ? "completed" : "awaiting_response";
+      const updates: Record<string, unknown> = {
+        ai_interventions: (task.ai_interventions ?? 0) + 1,
+        last_ai_nudge: now,
+        status: newStatus,
+      };
+      if (isSendOnly) updates.completed_at = now;
+      await supabase.from("tasks").update(updates).eq("id", taskId);
     }
 
     return new Response(

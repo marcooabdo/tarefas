@@ -48,6 +48,7 @@ interface Draft {
   nudge_repeat_hours: number;
   assignee_name: string;
   assignee_phone: string;
+  gia_instruction: string;
 }
 
 function defaultFirstNudge(): string {
@@ -70,6 +71,7 @@ const emptyDraft: Draft = {
   nudge_repeat_hours: 0,
   assignee_name: '',
   assignee_phone: '',
+  gia_instruction: '',
 };
 
 const RECURRENCE_LABEL: Record<TaskRecurrence, string> = {
@@ -136,6 +138,7 @@ export function Tasks() {
       nudge_repeat_hours: t.nudge_repeat_hours ?? 0,
       assignee_name: t.assignee_name ?? '',
       assignee_phone: t.assignee_phone ?? '',
+      gia_instruction: t.gia_instruction ?? '',
     });
     setRecipientSearch('');
     setRecipientFilter('all');
@@ -193,6 +196,7 @@ export function Tasks() {
           nudge_repeat_hours: draft.nudge_repeat_hours,
           nudge_active: !!firstNudge,
           last_ai_nudge: null,
+          gia_instruction: draft.gia_instruction,
         })
         .eq('id', editingId);
     } else {
@@ -213,6 +217,7 @@ export function Tasks() {
           first_nudge_at: firstNudge,
           nudge_repeat_hours: draft.nudge_repeat_hours,
           nudge_active: !!firstNudge,
+          gia_instruction: draft.gia_instruction,
         });
       }
 
@@ -232,6 +237,7 @@ export function Tasks() {
           first_nudge_at: firstNudge,
           nudge_repeat_hours: draft.nudge_repeat_hours,
           nudge_active: !!firstNudge,
+          gia_instruction: draft.gia_instruction,
         });
       }
 
@@ -594,6 +600,17 @@ export function Tasks() {
                   value={draft.description}
                   onChange={(e) => setDraft({ ...draft, description: e.target.value })}
                   placeholder="Contexto ou detalhes da tarefa"
+                />
+              </Field>
+
+              <Field label="Instrução para a GIA" hint="Diga como a GIA deve agir. Ex: 'Apenas envie uma mensagem de boa semana, sem pedir status' ou 'Cobre o status pedindo 1, 2 ou 3'. Se vazio, a GIA cobra normalmente.">
+                <textarea
+                  className="nx-input"
+                  rows={2}
+                  value={draft.gia_instruction}
+                  onChange={(e) => setDraft({ ...draft, gia_instruction: e.target.value })}
+                  placeholder="Ex: Só envie uma mensagem desejando boa semana, sem pedir resposta. Marque como concluída após enviar."
+                  style={{ borderColor: draft.gia_instruction ? 'rgba(0,229,255,0.4)' : undefined }}
                 />
               </Field>
 
