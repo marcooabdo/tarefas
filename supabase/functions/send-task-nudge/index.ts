@@ -61,13 +61,14 @@ Deno.serve(async (req: Request) => {
     const due = task.due_date ? new Date(task.due_date) : null;
     let dueLabel = "sem prazo";
     if (due) {
-      const nowDate = new Date();
-      const dueDay = new Date(due.getFullYear(), due.getMonth(), due.getDate());
-      const todayDay = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate());
+      const nowBR = new Date(Date.now() - 3 * 60 * 60 * 1000);
+      const dueBR = new Date(due.getTime() - 3 * 60 * 60 * 1000);
+      const dueDay = new Date(dueBR.getUTCFullYear(), dueBR.getUTCMonth(), dueBR.getUTCDate());
+      const todayDay = new Date(nowBR.getUTCFullYear(), nowBR.getUTCMonth(), nowBR.getUTCDate());
       const diffDays = Math.round((todayDay.getTime() - dueDay.getTime()) / (1000 * 60 * 60 * 24));
       if (diffDays > 0) dueLabel = `${diffDays} dia(s) atrasada`;
       else if (diffDays === 0) dueLabel = "vence hoje";
-      else if (diffDays === -1) dueLabel = "vence amanhã";
+      else if (diffDays === -1) dueLabel = "vence amanha";
       else dueLabel = `vence em ${Math.abs(diffDays)} dia(s)`;
     }
 
@@ -157,8 +158,11 @@ Deno.serve(async (req: Request) => {
             `Referência: ${task.task_code ?? "—"}\n` +
             (giaInstruction ? `\nInstrução adicional do gestor: ${giaInstruction}\n` : "") +
             `\nINSTRUÇÕES OBRIGATÓRIAS:\n` +
+            `- SIGA RIGOROSAMENTE todas as instruções do system prompt (emojis, tom, formato, apresentação)\n` +
             `- Explique claramente para a pessoa O QUE é a tarefa usando o título e a descrição fornecidos.\n` +
             `- Contextualize o que precisa ser feito de forma objetiva para que a pessoa entenda exatamente do que se trata.\n` +
+            `- Informe o prazo REAL da tarefa (${dueLabel}). NÃO invente prazos.\n` +
+            `- Se o prazo é futuro, a data exata é: ${task.due_date ? new Date(new Date(task.due_date).getTime() - 3*60*60*1000).toISOString().slice(0,10) : "sem prazo"}\n` +
             `- A mensagem DEVE incluir explicitamente as opções de resposta:\n` +
             `1 - Concluída\n2 - Em execução\n3 - Bloqueada\n\n` +
             `Termine com "Ref: ${task.task_code ?? "—"}". Não inclua nada além da mensagem final.`;

@@ -1431,7 +1431,7 @@ CAPACIDADES:
 - Se o gestor pedir para alterar algo (ex: "ATOM-1017 altere o envio para AGORA"), voce deve confirmar e executar
 - Se o gestor perguntar algo, responda com base no contexto das tarefas
 - Seja sempre concisa e direta, sem enrolacao
-- Use emojis quando apropriado
+- SIGA RIGOROSAMENTE as instrucoes do system prompt acima (emojis, tom, formato, etc)
 - Se voce nao pode executar uma acao diretamente, explique o que vai fazer
 
 ACAO ESPECIAL - ALTERAR AGENDAMENTO:
