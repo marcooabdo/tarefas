@@ -54,12 +54,12 @@ export function Automation() {
   }
 
   return (
-    <div style={{ padding: '32px 36px', maxWidth: '1200px', margin: '0 auto' }}>
+    <div className="page-container" style={{ maxWidth: '1200px' }}>
       <header style={{ marginBottom: '28px' }}>
         <div style={{ fontSize: '11px', color: '#6b7384', letterSpacing: '2px', textTransform: 'uppercase', fontWeight: 600, marginBottom: '6px' }}>
           Configurações do Gestor IA
         </div>
-        <h1 style={{ fontSize: '32px', fontWeight: 700, color: '#f4f6fb', margin: 0, letterSpacing: '-0.5px' }}>
+        <h1 className="page-title" style={{ fontSize: '32px', fontWeight: 700, color: '#f4f6fb', margin: 0, letterSpacing: '-0.5px' }}>
           Automação e IA
         </h1>
         <p style={{ color: '#9aa3b2', margin: '6px 0 0', fontSize: '14px' }}>

@@ -27,16 +27,9 @@ export function AppLayout() {
   useNudgePoller();
 
   return (
-    <div style={{ display: 'flex', minHeight: '100vh' }}>
+    <div className="app-shell">
       <Sidebar />
-      <main
-        style={{
-          flex: 1,
-          overflowX: 'hidden',
-          overflowY: 'auto',
-          minWidth: 0,
-        }}
-      >
+      <main className="app-main">
         <Outlet />
       </main>
     </div>

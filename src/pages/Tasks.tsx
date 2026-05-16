@@ -412,20 +412,20 @@ export function Tasks() {
   }
 
   return (
-    <div style={{ padding: '32px 36px', maxWidth: '1600px', margin: '0 auto' }}>
+    <div className="page-container" style={{ maxWidth: '1600px' }}>
       <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: '28px', flexWrap: 'wrap', gap: '16px' }}>
         <div>
           <div style={{ fontSize: '11px', color: '#6b7384', letterSpacing: '2px', textTransform: 'uppercase', fontWeight: 600, marginBottom: '6px' }}>
             Workflow Operacional
           </div>
-          <h1 style={{ fontSize: '32px', fontWeight: 700, color: '#f4f6fb', margin: 0, letterSpacing: '-0.5px' }}>
+          <h1 className="page-title" style={{ fontSize: '32px', fontWeight: 700, color: '#f4f6fb', margin: 0, letterSpacing: '-0.5px' }}>
             Gestor de Tarefas
           </h1>
           <p style={{ color: '#9aa3b2', margin: '6px 0 0', fontSize: '14px' }}>
             Kanban integrado: a IA envia cobranças reais via Evolution API e atualiza o status ao receber respostas no webhook.
           </p>
         </div>
-        <div style={{ display: 'flex', gap: '10px' }}>
+        <div className="header-actions" style={{ display: 'flex', gap: '10px' }}>
           <div className="glass" style={{ padding: '4px', display: 'flex', gap: '2px' }}>
             <button
               onClick={() => setView('kanban')}
@@ -462,6 +462,7 @@ export function Tasks() {
         <div style={{ padding: '60px', textAlign: 'center', color: '#6b7384' }}>Carregando tarefas...</div>
       ) : view === 'kanban' ? (
         <div
+          className="kanban-wrapper"
           style={{
             display: 'grid',
             gridTemplateColumns: 'repeat(4, minmax(260px, 1fr))',
@@ -574,7 +575,7 @@ export function Tasks() {
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            className="glass"
+            className="glass modal-content"
             style={{ width: '100%', maxWidth: '620px', padding: '28px', maxHeight: '90vh', overflowY: 'auto' }}
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
@@ -616,7 +617,7 @@ export function Tasks() {
 
               {editingId && (
                 <div>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '12px' }}>
+                  <div className="form-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '12px' }}>
                     <Field label="Responsável" hint="Preencha manualmente ou selecione da lista abaixo">
                       <input
                         className="nx-input"
@@ -738,7 +739,7 @@ export function Tasks() {
 
               {!editingId && (
               <div>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '14px' }}>
+                <div className="form-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '14px' }}>
                   <Field label="Nome do responsável (manual)" hint="Preencha aqui OU selecione da lista abaixo">
                     <input
                       className="nx-input"
@@ -896,7 +897,7 @@ export function Tasks() {
               </div>
               )}
 
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px' }}>
+              <div className="form-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px' }}>
                 <Field label="Status">
                   <select
                     className="nx-input"

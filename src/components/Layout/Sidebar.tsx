@@ -1,5 +1,6 @@
+import { useState } from 'react';
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, SquareKanban as KanbanSquare, Bot, ChartBar as BarChart3, Users, FileText, CalendarClock, ListChecks, Settings as SettingsIcon, Sparkles } from 'lucide-react';
+import { LayoutDashboard, SquareKanban as KanbanSquare, Bot, ChartBar as BarChart3, Users, FileText, CalendarClock, ListChecks, Settings as SettingsIcon, Sparkles, Menu, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
 type NavItem = { to: string; label: string; Icon: LucideIcon; exact?: boolean };
@@ -19,12 +20,13 @@ const secondary: NavItem[] = [
   { to: '/settings', label: 'Configurações', Icon: SettingsIcon },
 ];
 
-function SidebarLink({ item }: { item: NavItem }) {
+function SidebarLink({ item, onClick }: { item: NavItem; onClick?: () => void }) {
   const { to, label, Icon, exact } = item;
   return (
     <NavLink
       to={to}
       end={exact}
+      onClick={onClick}
       style={({ isActive }) => ({
         display: 'flex',
         alignItems: 'center',
@@ -54,22 +56,9 @@ function SidebarLink({ item }: { item: NavItem }) {
   );
 }
 
-export function Sidebar() {
+function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   return (
-    <aside
-      style={{
-        width: '250px',
-        minHeight: '100vh',
-        background: 'linear-gradient(180deg, rgba(14,16,22,0.95) 0%, rgba(7,8,12,0.98) 100%)',
-        borderRight: '1px solid rgba(255,255,255,0.06)',
-        display: 'flex',
-        flexDirection: 'column',
-        flexShrink: 0,
-        position: 'sticky',
-        top: 0,
-        height: '100vh',
-      }}
-    >
+    <>
       <div
         style={{
           padding: '20px 18px 18px',
@@ -109,14 +98,14 @@ export function Sidebar() {
           Operações
         </div>
         {primary.map((item) => (
-          <SidebarLink key={item.to} item={item} />
+          <SidebarLink key={item.to} item={item} onClick={onNavigate} />
         ))}
 
         <div style={{ padding: '16px 8px 8px', fontSize: '10px', color: '#6b7384', letterSpacing: '1.2px', textTransform: 'uppercase', fontWeight: 600 }}>
           WhatsApp
         </div>
         {secondary.map((item) => (
-          <SidebarLink key={item.to} item={item} />
+          <SidebarLink key={item.to} item={item} onClick={onNavigate} />
         ))}
       </nav>
 
@@ -138,6 +127,90 @@ export function Sidebar() {
           <span style={{ fontSize: '10px', color: '#6b7384' }}>IA monitorando</span>
         </div>
       </div>
-    </aside>
+    </>
+  );
+}
+
+export function Sidebar() {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <>
+      {/* Mobile header bar */}
+      <div className="mobile-header">
+        <button
+          onClick={() => setOpen(true)}
+          style={{
+            background: 'none',
+            border: 'none',
+            color: '#f4f6fb',
+            cursor: 'pointer',
+            padding: '8px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+          aria-label="Abrir menu"
+        >
+          <Menu size={24} />
+        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <div
+            style={{
+              width: '28px',
+              height: '28px',
+              borderRadius: '8px',
+              background: 'linear-gradient(135deg, #00e5ff 0%, #b347ff 100%)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            <Sparkles size={14} color="#07080c" strokeWidth={2.4} />
+          </div>
+          <span style={{ fontSize: '13px', fontWeight: 700, color: '#f4f6fb' }}>NEXUS AI</span>
+        </div>
+        <span className="neon-dot" />
+      </div>
+
+      {/* Desktop sidebar */}
+      <aside className="desktop-sidebar">
+        <SidebarContent />
+      </aside>
+
+      {/* Mobile overlay + drawer */}
+      {open && (
+        <div
+          className="mobile-overlay"
+          onClick={() => setOpen(false)}
+        >
+          <aside
+            className="mobile-drawer"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: 'flex', justifyContent: 'flex-end', padding: '12px 12px 0' }}>
+              <button
+                onClick={() => setOpen(false)}
+                style={{
+                  background: 'rgba(255,255,255,0.06)',
+                  border: '1px solid rgba(255,255,255,0.1)',
+                  borderRadius: '8px',
+                  color: '#f4f6fb',
+                  cursor: 'pointer',
+                  padding: '6px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+                aria-label="Fechar menu"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <SidebarContent onNavigate={() => setOpen(false)} />
+          </aside>
+        </div>
+      )}
+    </>
   );
 }
