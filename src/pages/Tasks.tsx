@@ -167,9 +167,11 @@ export function Tasks() {
     return map;
   }, [tasks]);
 
+  const hasManualAssignee = draft.assignee_name.trim() && draft.assignee_phone.trim();
+
   async function saveTask() {
     if (!draft.title.trim()) return;
-    if (!editingId && draft.recipient_ids.length === 0) return;
+    if (!editingId && draft.recipient_ids.length === 0 && !hasManualAssignee) return;
     setSaving(true);
     const due = draft.due_date ? new Date(draft.due_date).toISOString() : null;
     const firstNudge = draft.first_nudge_at ? new Date(draft.first_nudge_at).toISOString() : null;
@@ -194,23 +196,48 @@ export function Tasks() {
         })
         .eq('id', editingId);
     } else {
+      const rows: Array<Record<string, unknown>> = [];
+
+      if (hasManualAssignee) {
+        rows.push({
+          title: draft.title,
+          description: draft.description,
+          assignee_name: draft.assignee_name.trim(),
+          assignee_phone: draft.assignee_phone.trim(),
+          group_name: '',
+          status: draft.status,
+          priority: draft.priority,
+          due_date: due,
+          recurrence: draft.recurrence,
+          recurrence_interval: draft.recurrence_interval,
+          first_nudge_at: firstNudge,
+          nudge_repeat_hours: draft.nudge_repeat_hours,
+          nudge_active: !!firstNudge,
+        });
+      }
+
       const recipients = contacts.filter((c) => draft.recipient_ids.includes(c.id));
-      const rows = recipients.map((r) => ({
-        title: draft.title,
-        description: draft.description,
-        assignee_name: r.name,
-        assignee_phone: r.phone,
-        group_name: r.is_group ? r.name : (r.department || ''),
-        status: draft.status,
-        priority: draft.priority,
-        due_date: due,
-        recurrence: draft.recurrence,
-        recurrence_interval: draft.recurrence_interval,
-        first_nudge_at: firstNudge,
-        nudge_repeat_hours: draft.nudge_repeat_hours,
-        nudge_active: !!firstNudge,
-      }));
-      await supabase.from('tasks').insert(rows);
+      for (const r of recipients) {
+        rows.push({
+          title: draft.title,
+          description: draft.description,
+          assignee_name: r.name,
+          assignee_phone: r.phone,
+          group_name: r.is_group ? r.name : (r.department || ''),
+          status: draft.status,
+          priority: draft.priority,
+          due_date: due,
+          recurrence: draft.recurrence,
+          recurrence_interval: draft.recurrence_interval,
+          first_nudge_at: firstNudge,
+          nudge_repeat_hours: draft.nudge_repeat_hours,
+          nudge_active: !!firstNudge,
+        });
+      }
+
+      if (rows.length > 0) {
+        await supabase.from('tasks').insert(rows);
+      }
     }
 
     setSaving(false);
@@ -694,6 +721,34 @@ export function Tasks() {
 
               {!editingId && (
               <div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '14px' }}>
+                  <Field label="Nome do responsável (manual)" hint="Preencha aqui OU selecione da lista abaixo">
+                    <input
+                      className="nx-input"
+                      value={draft.assignee_name}
+                      onChange={(e) => setDraft({ ...draft, assignee_name: e.target.value })}
+                      placeholder="Ex: João Silva"
+                    />
+                  </Field>
+                  <Field label="WhatsApp (manual)" hint="Número com código do país (ex: 5534999990000)">
+                    <input
+                      className="nx-input"
+                      type="tel"
+                      value={draft.assignee_phone}
+                      onChange={(e) => setDraft({ ...draft, assignee_phone: e.target.value.replace(/\D/g, '') })}
+                      placeholder="5534999990000"
+                    />
+                  </Field>
+                </div>
+
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '14px',
+                }}>
+                  <div style={{ flex: 1, height: '1px', background: 'rgba(255,255,255,0.08)' }} />
+                  <span style={{ fontSize: '10px', color: '#6b7384', fontWeight: 600, letterSpacing: '1px', textTransform: 'uppercase' }}>ou selecione da lista</span>
+                  <div style={{ flex: 1, height: '1px', background: 'rgba(255,255,255,0.08)' }} />
+                </div>
+
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
                   <span style={{ fontSize: '11px', color: '#9aa3b2', fontWeight: 600, letterSpacing: '0.4px', textTransform: 'uppercase' }}>
                     Destinatários <span style={{ color: '#00e5ff', marginLeft: '4px' }}>{draft.recipient_ids.length > 0 ? `(${draft.recipient_ids.length})` : ''}</span>
@@ -929,14 +984,14 @@ export function Tasks() {
               <button
                 onClick={saveTask}
                 className="neon-btn"
-                disabled={saving || !draft.title.trim() || (!editingId && draft.recipient_ids.length === 0)}
+                disabled={saving || !draft.title.trim() || (!editingId && draft.recipient_ids.length === 0 && !hasManualAssignee)}
               >
                 {saving
                   ? 'Salvando...'
                   : editingId
                   ? 'Salvar Alterações'
-                  : draft.recipient_ids.length > 1
-                  ? `Criar ${draft.recipient_ids.length} Tarefas`
+                  : (draft.recipient_ids.length + (hasManualAssignee ? 1 : 0)) > 1
+                  ? `Criar ${draft.recipient_ids.length + (hasManualAssignee ? 1 : 0)} Tarefas`
                   : 'Criar Tarefa'}
               </button>
             </div>
