@@ -463,6 +463,7 @@ Deno.serve(async (req: Request) => {
 
         const title = (fields.title ?? "").trim().slice(0, 200) || "Tarefa sem título";
         const description = (fields.description ?? "").trim();
+        const giaInstruction = (fields.instruction ?? "").trim();
 
         const priorityRaw = (fields.priority ?? "").toLowerCase();
         const priority =
@@ -627,8 +628,6 @@ Deno.serve(async (req: Request) => {
             }
           }
         }
-
-        const giaInstruction = (fields.instruction ?? "").trim();
 
         const { data: created } = await supabase
           .from("tasks")
