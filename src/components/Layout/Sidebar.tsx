@@ -96,7 +96,7 @@ export function Sidebar() {
         </div>
         <div>
           <div style={{ fontSize: '14px', fontWeight: 700, color: '#f4f6fb', lineHeight: 1.15, letterSpacing: '0.2px' }}>
-            NEXUS AI - GIA - GROUP GLOBAL
+            NEXUS AI - GROUP GLOBAL
           </div>
           <div style={{ fontSize: '11px', color: '#6b7384', letterSpacing: '0.4px', textTransform: 'uppercase' }}>
             Task Command Center
