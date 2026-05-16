@@ -285,7 +285,11 @@ export function Tasks() {
   }
 
   async function removeTask(id: string) {
-    await supabase.from('tasks').delete().eq('id', id);
+    const { error } = await supabase.from('tasks').delete().eq('id', id);
+    if (error) {
+      alert('Erro ao excluir tarefa: ' + error.message);
+      return;
+    }
     setTasks((prev) => prev.filter((t) => t.id !== id));
   }
 
