@@ -337,6 +337,49 @@ Deno.serve(async (req: Request) => {
           }
         }
 
+        await supabase
+          .from("pending_task_confirmations")
+          .update({ status: "confirmed", resolved_at: new Date().toISOString() })
+          .eq("id", confirmation.id);
+
+        const apiUrlConf = sConf["evolution_api_url"]?.replace(/\/$/, "");
+        const apiKeyConf = sConf["evolution_api_key"];
+        const instanceConf = sConf["evolution_instance_name"];
+
+        // If this is a NL command with proposed_message, go to approval flow
+        if (draft.is_nl_command && draft.proposed_message && assigneeName !== (sConf["owner_name"] || "Eu")) {
+          const taskDraftForApproval = { ...draft, group_name: groupName };
+          await supabase.from("pending_message_approvals").insert({
+            owner_jid: remoteJid,
+            task_draft: taskDraftForApproval,
+            proposed_message: String(draft.proposed_message),
+            assignee_name: assigneeName,
+            assignee_phone: assigneePhone,
+            status: "pending",
+          });
+
+          if (apiUrlConf && apiKeyConf && instanceConf) {
+            const numberConf = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
+            const shouldNudge = draft.nudge_active ?? false;
+            const approvalMsg =
+              `Contato confirmado: *${assigneeName}*\n\nVou enviar:\n---\n${draft.proposed_message}\n---\n\n` +
+              (shouldNudge ? `Cobranca ativa: vou acompanhar e cobrar respostas.\n` : `Sem cobranca: apenas envio sem cobrar resposta.\n`) +
+              `\nPosso mandar? Responda *ok* para aprovar ou *nao* para cancelar.`;
+            await fetch(`${apiUrlConf}/message/sendText/${instanceConf}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", apikey: apiKeyConf },
+              body: JSON.stringify({ number: numberConf, text: approvalMsg }),
+            });
+          }
+
+          await logEvent("confirmation-to-approval", `choice=${choice} assignee=${assigneeName}`);
+          return new Response(
+            JSON.stringify({ confirmed: true, awaiting_approval: true, assignee: assigneeName }),
+            { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // Standard flow: create task directly
         const { data: created } = await supabase
           .from("tasks")
           .insert({
@@ -358,15 +401,6 @@ Deno.serve(async (req: Request) => {
           .select()
           .maybeSingle();
 
-        await supabase
-          .from("pending_task_confirmations")
-          .update({ status: "confirmed", resolved_at: new Date().toISOString() })
-          .eq("id", confirmation.id);
-
-        // Send confirmation reply
-        const apiUrlConf = sConf["evolution_api_url"]?.replace(/\/$/, "");
-        const apiKeyConf = sConf["evolution_api_key"];
-        const instanceConf = sConf["evolution_instance_name"];
         if (apiUrlConf && apiKeyConf && instanceConf) {
           const numberConf = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
           const code = created?.task_code ? ` ${created.task_code}` : "";
@@ -385,6 +419,118 @@ Deno.serve(async (req: Request) => {
           JSON.stringify({ confirmed: true, choice, task_id: created?.id }),
           { headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
+      }
+    }
+
+    // Handle pending message approval responses (owner replying "ok"/"sim"/"manda"/"nao"/"cancela")
+    if (text && remoteJid) {
+      const approvalText = text.trim().toLowerCase();
+      const isApprove = /^(ok|sim|manda|envia|aprovo|pode|pode mandar|vai|manda ver|show|beleza|perfeito|bora|blz|s)\s*$/i.test(approvalText);
+      const isReject = /^(n[aã]o|cancela|nao|nope|n|nao manda|cancela|para|deixa|esquece)\s*$/i.test(approvalText);
+      if (isApprove || isReject) {
+        const { data: pendingApproval } = await supabase
+          .from("pending_message_approvals")
+          .select("*")
+          .eq("owner_jid", remoteJid)
+          .eq("status", "pending")
+          .order("created_at", { ascending: false })
+          .limit(1);
+
+        if (pendingApproval && pendingApproval.length > 0) {
+          const approval = pendingApproval[0];
+          const { data: settingsAppr } = await supabase.from("app_settings").select("key, value");
+          const sAppr: Record<string, string> = {};
+          for (const row of settingsAppr ?? []) sAppr[row.key] = row.value;
+          const apiUrlAppr = sAppr["evolution_api_url"]?.replace(/\/$/, "");
+          const apiKeyAppr = sAppr["evolution_api_key"];
+          const instanceAppr = sAppr["evolution_instance_name"];
+
+          if (isReject) {
+            await supabase
+              .from("pending_message_approvals")
+              .update({ status: "rejected", resolved_at: new Date().toISOString() })
+              .eq("id", approval.id);
+            if (apiUrlAppr && apiKeyAppr && instanceAppr) {
+              const numberAppr = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
+              await fetch(`${apiUrlAppr}/message/sendText/${instanceAppr}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json", apikey: apiKeyAppr },
+                body: JSON.stringify({ number: numberAppr, text: "Cancelado. Mensagem nao enviada." }),
+              });
+            }
+            await logEvent("message-approval-rejected", `approval=${approval.id}`);
+            return new Response(
+              JSON.stringify({ approval_rejected: true, id: approval.id }),
+              { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
+          }
+
+          // Approved - create the task and send the message
+          const draft = approval.task_draft as Record<string, unknown>;
+          const { data: createdTask } = await supabase
+            .from("tasks")
+            .insert({
+              title: draft.title ?? "Tarefa sem título",
+              description: draft.description ?? "",
+              assignee_name: approval.assignee_name,
+              assignee_phone: approval.assignee_phone,
+              group_name: draft.group_name ?? "",
+              status: "pending",
+              priority: draft.priority ?? "medium",
+              due_date: draft.due_date ?? null,
+              recurrence: draft.recurrence ?? "none",
+              recurrence_interval: draft.recurrence_interval ?? 1,
+              first_nudge_at: draft.first_nudge_at ?? null,
+              nudge_repeat_hours: draft.nudge_repeat_hours ?? 0,
+              nudge_active: draft.nudge_active ?? false,
+              gia_instruction: draft.gia_instruction ?? "",
+            })
+            .select()
+            .maybeSingle();
+
+          // Send the proposed message to the contact
+          if (apiUrlAppr && apiKeyAppr && instanceAppr && approval.proposed_message) {
+            const isGroupAppr = String(approval.assignee_phone).includes("@g.us");
+            let numberDest = isGroupAppr ? approval.assignee_phone : normalizePhone(approval.assignee_phone);
+            if (!isGroupAppr && numberDest.length <= 11) numberDest = "55" + numberDest;
+            await fetch(`${apiUrlAppr}/message/sendText/${instanceAppr}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", apikey: apiKeyAppr },
+              body: JSON.stringify({ number: numberDest, text: approval.proposed_message }),
+            });
+            await supabase.from("send_logs").insert({
+              contact_name: approval.assignee_name,
+              contact_phone: approval.assignee_phone,
+              template_name: "Mensagem aprovada (GIA NL)",
+              message_content: approval.proposed_message,
+              status: "sent",
+              sent_at: new Date().toISOString(),
+            });
+          }
+
+          await supabase
+            .from("pending_message_approvals")
+            .update({ status: "approved", resolved_at: new Date().toISOString(), task_id: createdTask?.id ?? null })
+            .eq("id", approval.id);
+
+          // Notify the owner
+          if (apiUrlAppr && apiKeyAppr && instanceAppr) {
+            const numberAppr = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
+            const code = createdTask?.task_code ? ` ${createdTask.task_code}` : "";
+            const confirmMsg = `Mensagem enviada para *${approval.assignee_name}*${code}. Estou acompanhando.`;
+            await fetch(`${apiUrlAppr}/message/sendText/${instanceAppr}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", apikey: apiKeyAppr },
+              body: JSON.stringify({ number: numberAppr, text: confirmMsg }),
+            });
+          }
+
+          await logEvent("message-approval-sent", `approval=${approval.id} task=${createdTask?.id ?? ""}`);
+          return new Response(
+            JSON.stringify({ approved: true, task_id: createdTask?.id }),
+            { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
       }
     }
 
@@ -691,6 +837,211 @@ Deno.serve(async (req: Request) => {
       }
     }
 
+    // Natural language GIA command: "GIA, envia para fulano..." or "GIA envia..." (no structured fields)
+    const giaNLMatch = /^\s*GIA\s*[,\s]+(.+)$/is.exec(text);
+    const isStructuredGIA = /^\s*GIA\s*:/i.test(text);
+    if (giaNLMatch && !isStructuredGIA && remoteJid && fromMe) {
+      const { data: settingsNL } = await supabase.from("app_settings").select("key, value");
+      const sNL: Record<string, string> = {};
+      for (const row of settingsNL ?? []) sNL[row.key] = row.value;
+      const ownerPhoneNL = sNL["owner_phone"] ?? "";
+      const incomingNL = remoteJid.split("@")[0];
+      const isOwnerNL = ownerPhoneNL && phonesMatch(ownerPhoneNL, incomingNL);
+
+      if (isOwnerNL) {
+        const openaiKeyNL = sNL["openai_api_key"] ?? "";
+        const openaiModelNL = sNL["openai_model"] || "gpt-4o-mini";
+
+        if (openaiKeyNL) {
+          const freeText = giaNLMatch[1].trim();
+          const parsePrompt = `Voce e a GIA, assistente executiva. O gestor enviou este comando por WhatsApp em linguagem natural. Extraia as informacoes estruturadas.
+
+COMANDO: "${freeText}"
+
+Responda APENAS com JSON valido (sem markdown, sem crase), com estes campos:
+{
+  "title": "titulo curto da tarefa/acao (max 80 chars)",
+  "description": "descricao completa do que fazer",
+  "assignee": "nome da pessoa destinataria (se mencionada, senao vazio)",
+  "priority": "high/medium/low",
+  "due_date_text": "texto do prazo se mencionado, senao vazio",
+  "recurrence": "none/daily/weekly/monthly",
+  "nudge": "true se deve cobrar resposta, false se e so envio sem cobranca",
+  "instruction": "instrucao de COMO a GIA deve agir - ex: 'seja firme', 'apenas envie sem pedir resposta', 'cobre normalmente'",
+  "proposed_message": "a mensagem EXATA que a GIA deve enviar para o destinatario, escrita de forma natural como se fosse a assistente do gestor falando com a pessoa"
+}
+
+REGRAS:
+- Se o gestor quer ENVIAR uma mensagem (perguntar algo, pedir algo, avisar), o proposed_message deve ser essa mensagem escrita de forma profissional e cordial
+- Se o gestor quer COBRAR algo, a instrucao deve refletir o tom (firme, educado, etc)
+- O proposed_message deve ser escrito na primeira pessoa como assistente do gestor (Ex: "Ola! Aqui e a GIA, assistente do Sr. Marco. Ele gostaria de saber...")
+- Se nao ha destinatario claro, deixe assignee vazio
+- Se nao ha prazo, deixe due_date_text vazio`;
+
+          try {
+            const parseRes = await fetch("https://api.openai.com/v1/chat/completions", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", Authorization: `Bearer ${openaiKeyNL}` },
+              body: JSON.stringify({
+                model: openaiModelNL,
+                temperature: 0.3,
+                messages: [
+                  { role: "system", content: "Voce extrai informacoes de comandos em linguagem natural. Responda SOMENTE com JSON valido." },
+                  { role: "user", content: parsePrompt },
+                ],
+              }),
+            });
+
+            if (parseRes.ok) {
+              const parseData = await parseRes.json();
+              const rawContent = String(parseData?.choices?.[0]?.message?.content ?? "").trim();
+              const jsonStr = rawContent.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+              const parsed = JSON.parse(jsonStr);
+
+              const title = String(parsed.title || "").slice(0, 200) || "Tarefa sem título";
+              const description = String(parsed.description || "");
+              const assigneeRaw = String(parsed.assignee || "").trim();
+              const priority = /alta|high|urgente/.test(String(parsed.priority || "")) ? "high" : /baixa|low/.test(String(parsed.priority || "")) ? "low" : "medium";
+              const instruction = String(parsed.instruction || "");
+              const proposedMessage = String(parsed.proposed_message || "");
+              const shouldNudge = parsed.nudge !== false && parsed.nudge !== "false";
+              const recurrenceRaw = String(parsed.recurrence || "none").toLowerCase();
+              const recurrence = /daily|diari/.test(recurrenceRaw) ? "daily" : /weekly|seman/.test(recurrenceRaw) ? "weekly" : /monthly|mens/.test(recurrenceRaw) ? "monthly" : "none";
+
+              // Resolve assignee
+              let assigneeName = sNL["owner_name"] || "Eu";
+              let assigneePhone = normalizePhone(ownerPhoneNL);
+              let groupName = "";
+
+              if (assigneeRaw) {
+                // Search in contacts
+                const { data: byName } = await supabase
+                  .from("contacts")
+                  .select("id, name, phone, country_code, is_group, remote_jid")
+                  .eq("active", true)
+                  .ilike("name", `%${assigneeRaw}%`)
+                  .limit(5);
+
+                if (byName && byName.length === 1) {
+                  const c = byName[0];
+                  assigneeName = c.name;
+                  assigneePhone = c.remote_jid ? (c.is_group ? String(c.remote_jid) : normalizePhone(String(c.remote_jid).split("@")[0])) : normalizePhone(String(c.phone ?? ""));
+                  if (c.is_group) groupName = c.name;
+                } else if (byName && byName.length > 1) {
+                  const exact = byName.find((c) => c.name.toLowerCase() === assigneeRaw.toLowerCase());
+                  if (exact) {
+                    assigneeName = exact.name;
+                    assigneePhone = exact.remote_jid ? (exact.is_group ? String(exact.remote_jid) : normalizePhone(String(exact.remote_jid).split("@")[0])) : normalizePhone(String(exact.phone ?? ""));
+                    if (exact.is_group) groupName = exact.name;
+                  } else {
+                    // Multiple candidates - ask confirmation
+                    const candidates = byName.map((c) => ({
+                      remote_jid: c.remote_jid ?? "",
+                      name: c.name,
+                      phone: c.phone ?? "",
+                      is_group: c.is_group ?? false,
+                    }));
+                    const confirmationNeeded = await askConfirmation(
+                      supabase, sNL, remoteJid, assigneeRaw, candidates,
+                      { title, description, priority, due_date: null, recurrence, recurrence_interval: 1, first_nudge_at: null, nudge_repeat_hours: shouldNudge ? 4 : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true }
+                    );
+                    if (confirmationNeeded) {
+                      await logEvent("gia-nl-awaiting-confirmation", `assignee="${assigneeRaw}"`);
+                      return new Response(
+                        JSON.stringify({ awaiting_confirmation: true, assignee: assigneeRaw }),
+                        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+                      );
+                    }
+                  }
+                } else {
+                  // Not found in contacts - search WhatsApp
+                  const whatsappCandidates = await searchWhatsAppChats(sNL, assigneeRaw);
+                  if (whatsappCandidates.length > 0) {
+                    const confirmationNeeded = await askConfirmation(
+                      supabase, sNL, remoteJid, assigneeRaw, whatsappCandidates,
+                      { title, description, priority, due_date: null, recurrence, recurrence_interval: 1, first_nudge_at: null, nudge_repeat_hours: shouldNudge ? 4 : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true }
+                    );
+                    if (confirmationNeeded) {
+                      await logEvent("gia-nl-awaiting-confirmation", `assignee="${assigneeRaw}" whatsapp`);
+                      return new Response(
+                        JSON.stringify({ awaiting_confirmation: true, assignee: assigneeRaw }),
+                        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+                      );
+                    }
+                  } else {
+                    // Nobody found
+                    const apiUrlNotFound = sNL["evolution_api_url"]?.replace(/\/$/, "");
+                    const apiKeyNotFound = sNL["evolution_api_key"];
+                    const instanceNotFound = sNL["evolution_instance_name"];
+                    if (apiUrlNotFound && apiKeyNotFound && instanceNotFound) {
+                      const numberOwner = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
+                      await fetch(`${apiUrlNotFound}/message/sendText/${instanceNotFound}`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json", apikey: apiKeyNotFound },
+                        body: JSON.stringify({ number: numberOwner, text: `Nao encontrei o contato "${assigneeRaw}" nos seus contatos nem no WhatsApp. Tente com o nome exato ou numero.` }),
+                      });
+                    }
+                    await logEvent("gia-nl-contact-not-found", `assignee="${assigneeRaw}"`);
+                    return new Response(
+                      JSON.stringify({ error: "contact_not_found", assignee: assigneeRaw }),
+                      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+                    );
+                  }
+                }
+              }
+
+              // If we got here, assignee is resolved. Create approval request.
+              if (proposedMessage && assigneeName !== (sNL["owner_name"] || "Eu")) {
+                const taskDraft = {
+                  title, description, priority, recurrence, recurrence_interval: 1,
+                  due_date: null, first_nudge_at: null,
+                  nudge_repeat_hours: shouldNudge ? (Number(sNL["default_repeat_hours"] || "4") || 4) : 0,
+                  nudge_active: shouldNudge,
+                  gia_instruction: instruction,
+                  group_name: groupName,
+                };
+
+                await supabase.from("pending_message_approvals").insert({
+                  owner_jid: remoteJid,
+                  task_draft: taskDraft,
+                  proposed_message: proposedMessage,
+                  assignee_name: assigneeName,
+                  assignee_phone: assigneePhone,
+                  status: "pending",
+                });
+
+                // Ask owner for approval
+                const apiUrlNL = sNL["evolution_api_url"]?.replace(/\/$/, "");
+                const apiKeyNL = sNL["evolution_api_key"];
+                const instanceNL = sNL["evolution_instance_name"];
+                if (apiUrlNL && apiKeyNL && instanceNL) {
+                  const numberOwner = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
+                  const approvalMsg =
+                    `Entendi! Vou enviar para *${assigneeName}*:\n\n` +
+                    `---\n${proposedMessage}\n---\n\n` +
+                    (shouldNudge ? `Cobranca ativa: vou acompanhar e cobrar respostas.\n` : `Sem cobranca: apenas envio sem cobrar resposta.\n`) +
+                    `\nPosso mandar? Responda *ok* para aprovar ou *nao* para cancelar.`;
+                  await fetch(`${apiUrlNL}/message/sendText/${instanceNL}`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", apikey: apiKeyNL },
+                    body: JSON.stringify({ number: numberOwner, text: approvalMsg }),
+                  });
+                }
+
+                await logEvent("gia-nl-awaiting-approval", `to=${assigneeName}`);
+                return new Response(
+                  JSON.stringify({ awaiting_approval: true, assignee: assigneeName }),
+                  { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+                );
+              }
+            }
+          } catch (e) {
+            await logEvent("gia-nl-parse-error", e instanceof Error ? e.message : String(e));
+          }
+        }
+      }
+    }
+
     if (fromMe || !remoteJid || (!text && !buttonId)) {
       await logEvent("ignored", `fromMe=${fromMe} jid=${!!remoteJid} text=${!!text} btn=${!!buttonId}`);
       return new Response(JSON.stringify({ ignored: true }), {
@@ -828,11 +1179,86 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    const intent = classify(text);
+    // Intelligent response interpretation using gia_instruction when available
+    const giaInstr = String(match.gia_instruction ?? "").trim();
+    let intent: Intent = classify(text);
     const updates: Record<string, unknown> = {};
     const recurrence = String(match.recurrence ?? "none");
     const recurrenceInterval = Number(match.recurrence_interval ?? 1);
     let recurred = false;
+    let aiInterpretation = "";
+
+    // If gia_instruction exists and classify returns unknown, use GPT to interpret
+    if (giaInstr && intent === "unknown") {
+      const openaiKeyInt = settings["openai_api_key"] ?? "";
+      const openaiModelInt = settings["openai_model"] || "gpt-4o-mini";
+      if (openaiKeyInt) {
+        try {
+          const interpretPrompt =
+            `Voce e a GIA, assistente executiva. Uma tarefa foi enviada com a seguinte instrucao especial:\n` +
+            `INSTRUCAO: "${giaInstr}"\n\n` +
+            `TAREFA: "${match.title}"\n` +
+            `DESCRICAO: "${match.description || ""}"\n` +
+            `DESTINATARIO: "${match.assignee_name}"\n\n` +
+            `O destinatario respondeu:\n"${text}"\n\n` +
+            `Com base na instrucao e na resposta, responda APENAS com JSON:\n` +
+            `{\n` +
+            `  "status": "completed" ou "in_progress" ou "pending" ou "unknown",\n` +
+            `  "reason": "explicacao curta do porque voce decidiu esse status",\n` +
+            `  "reply_to_contact": "mensagem de resposta para enviar ao contato (curta, cordial)",\n` +
+            `  "notify_owner": "resumo para enviar ao gestor sobre o que aconteceu"\n` +
+            `}\n\n` +
+            `REGRAS:\n` +
+            `- Se a pessoa enviou informacao solicitada (PIX, dados, arquivo, etc) = completed\n` +
+            `- Se a pessoa disse que vai fazer depois/amanha/mais tarde = in_progress\n` +
+            `- Se a pessoa simplesmente respondeu/confirmou algo que era so envio = completed\n` +
+            `- Se a resposta e ambigua e voce nao tem certeza = unknown\n` +
+            `- reply_to_contact deve ser natural e breve\n` +
+            `- notify_owner deve ser um resumo util pro gestor`;
+          const intRes = await fetch("https://api.openai.com/v1/chat/completions", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${openaiKeyInt}` },
+            body: JSON.stringify({
+              model: openaiModelInt,
+              temperature: 0.3,
+              messages: [
+                { role: "system", content: "Voce interpreta respostas de WhatsApp no contexto de tarefas. Responda SOMENTE com JSON valido." },
+                { role: "user", content: interpretPrompt },
+              ],
+            }),
+          });
+          if (intRes.ok) {
+            const intData = await intRes.json();
+            const rawInt = String(intData?.choices?.[0]?.message?.content ?? "").trim();
+            const jsonInt = rawInt.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+            const parsed = JSON.parse(jsonInt);
+            const aiStatus = String(parsed.status || "unknown").toLowerCase();
+            if (aiStatus === "completed") intent = "completed";
+            else if (aiStatus === "in_progress") intent = "in_progress";
+            else if (aiStatus === "pending") intent = "blocked";
+            aiInterpretation = JSON.stringify(parsed);
+
+            // Notify owner about the response
+            if (parsed.notify_owner) {
+              const apiUrlNotify = settings["evolution_api_url"]?.replace(/\/$/, "");
+              const apiKeyNotify = settings["evolution_api_key"];
+              const instanceNotify = settings["evolution_instance_name"];
+              const ownerPhoneNotify = settings["owner_phone"] ?? "";
+              if (apiUrlNotify && apiKeyNotify && instanceNotify && ownerPhoneNotify) {
+                const ownerNumber = normalizePhone(ownerPhoneNotify);
+                const code = match.task_code ? ` [${match.task_code}]` : "";
+                const ownerMsg = `*Atualização${code}*\n${match.assignee_name} respondeu sobre "${match.title}":\n\n${parsed.notify_owner}`;
+                await fetch(`${apiUrlNotify}/message/sendText/${instanceNotify}`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json", apikey: apiKeyNotify },
+                  body: JSON.stringify({ number: ownerNumber, text: ownerMsg }),
+                });
+              }
+            }
+          }
+        } catch { /* fallback to simple classify */ }
+      }
+    }
 
     if (intent === "completed") {
       if (recurrence && recurrence !== "none") {
@@ -846,6 +1272,7 @@ Deno.serve(async (req: Request) => {
       } else {
         updates.status = "completed";
         updates.completed_at = new Date().toISOString();
+        if (giaInstr) updates.nudge_active = false;
       }
     } else if (intent === "in_progress") {
       updates.status = "in_progress";
@@ -867,7 +1294,7 @@ Deno.serve(async (req: Request) => {
     });
 
     let replied = false;
-    if (autoReply && intent !== "unknown") {
+    if (autoReply && (intent !== "unknown" || giaInstr)) {
       const apiUrl = settings["evolution_api_url"]?.replace(/\/$/, "");
       const apiKey = settings["evolution_api_key"];
       const instanceName = settings["evolution_instance_name"];
@@ -876,11 +1303,20 @@ Deno.serve(async (req: Request) => {
       const systemPrompt = settings["ai_system_prompt"] ?? "";
       if (apiUrl && apiKey && instanceName) {
         let replyText = replyFor(intent, String(match.assignee_name ?? ""), String(match.title ?? ""));
+
+        // If GPT already produced a reply from interpretation, use it
+        if (aiInterpretation) {
+          try {
+            const aiParsed = JSON.parse(aiInterpretation);
+            if (aiParsed.reply_to_contact) replyText = aiParsed.reply_to_contact;
+          } catch { /* use fallback */ }
+        }
+
         if (recurred) {
           const firstName = String(match.assignee_name ?? "").split(" ")[0] || "tudo bem";
           replyText = `Perfeito, ${firstName}! Registrei "${match.title}" como concluída. Como é uma tarefa recorrente, já reagendei para o próximo ciclo.`;
         }
-        if (openaiKey) {
+        if (!aiInterpretation && openaiKey) {
           try {
             const intentLabel =
               intent === "completed"
