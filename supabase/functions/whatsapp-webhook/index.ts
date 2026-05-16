@@ -353,6 +353,7 @@ Deno.serve(async (req: Request) => {
             first_nudge_at: draft.first_nudge_at ?? null,
             nudge_repeat_hours: draft.nudge_repeat_hours ?? 0,
             nudge_active: draft.nudge_active ?? false,
+            gia_instruction: draft.gia_instruction ?? "",
           })
           .select()
           .maybeSingle();
@@ -436,6 +437,7 @@ Deno.serve(async (req: Request) => {
           recorrencia: "recurrence", recorrência: "recurrence", recurrence: "recurrence",
           cobranca: "nudge", cobrança: "nudge", nudge: "nudge",
           repetir: "repeat", repeat: "repeat", intervalo: "repeat",
+          instrucao: "instruction", instrução: "instruction", instruction: "instruction", modo: "instruction",
         };
         const lines = body.split(/\n+/).map((l) => l.trim()).filter(Boolean);
         const knownKeyRegex = /^([A-Za-zÀ-ú\s]+?)\s*:\s*(.+)$/;
@@ -595,7 +597,7 @@ Deno.serve(async (req: Request) => {
                 }));
                 const confirmationNeeded = await askConfirmation(
                   supabase, settingsGia, remoteJid, assigneeRaw, candidates,
-                  { title, description, priority, due_date, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: first_nudge_at, nudge_repeat_hours, nudge_active }
+                  { title, description, priority, due_date, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: first_nudge_at, nudge_repeat_hours, nudge_active, gia_instruction: giaInstruction }
                 );
                 if (confirmationNeeded) {
                   await logEvent("gia-awaiting-confirmation", `assignee="${assigneeRaw}" candidates=${candidates.length}`);
@@ -611,7 +613,7 @@ Deno.serve(async (req: Request) => {
               if (whatsappCandidates.length > 0) {
                 const confirmationNeeded = await askConfirmation(
                   supabase, settingsGia, remoteJid, assigneeRaw, whatsappCandidates,
-                  { title, description, priority, due_date, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: first_nudge_at, nudge_repeat_hours, nudge_active }
+                  { title, description, priority, due_date, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: first_nudge_at, nudge_repeat_hours, nudge_active, gia_instruction: giaInstruction }
                 );
                 if (confirmationNeeded) {
                   await logEvent("gia-awaiting-confirmation", `assignee="${assigneeRaw}" candidates=${whatsappCandidates.length}`);
@@ -625,6 +627,8 @@ Deno.serve(async (req: Request) => {
             }
           }
         }
+
+        const giaInstruction = (fields.instruction ?? "").trim();
 
         const { data: created } = await supabase
           .from("tasks")
@@ -642,6 +646,7 @@ Deno.serve(async (req: Request) => {
             first_nudge_at,
             nudge_repeat_hours,
             nudge_active,
+            gia_instruction: giaInstruction,
           })
           .select()
           .maybeSingle();
@@ -670,7 +675,8 @@ Deno.serve(async (req: Request) => {
             `Prioridade: ${priority === "high" ? "alta" : priority === "low" ? "baixa" : "média"}\n` +
             `Prazo: ${fmtDate(due_date)}\n` +
             `Recorrência: ${recurrence === "none" ? "nenhuma" : recurrence}${recurrence !== "none" && recurrenceInterval > 1 ? ` x${recurrenceInterval}` : ""}\n` +
-            `Cobrança: ${fmtDate(first_nudge_at)}${nudge_repeat_hours > 0 ? ` (repete a cada ${nudge_repeat_hours}h)` : ""}`;
+            `Cobrança: ${fmtDate(first_nudge_at)}${nudge_repeat_hours > 0 ? ` (repete a cada ${nudge_repeat_hours}h)` : ""}` +
+            (giaInstruction ? `\nInstrução: ${giaInstruction}` : "");
           await fetch(`${apiUrlGia}/message/sendText/${instanceGia}`, {
             method: "POST",
             headers: { "Content-Type": "application/json", apikey: apiKeyGia },
