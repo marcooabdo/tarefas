@@ -422,6 +422,15 @@ Deno.serve(async (req: Request) => {
       }
     }
 
+    // Skip messages that are GIA's own responses (sent by the bot itself via Evolution API)
+    const isGiaOwnMessage = /Posso mandar\? Responda|Entendi!? Vou enviar|Mensagem enviada para|Cancelado\. Mensagem nao|Nao entendi a correcao|Encontrei estes contatos/i.test(text);
+    if (isGiaOwnMessage) {
+      await logEvent("ignored-gia-own-message", text.slice(0, 60));
+      return new Response(JSON.stringify({ ignored: true, reason: "gia_own_message" }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
     // Handle pending message approval responses (owner replying "ok"/"sim"/"manda"/"nao"/"cancela")
     if (text && remoteJid) {
       const approvalText = text.trim().toLowerCase();
@@ -465,8 +474,16 @@ Deno.serve(async (req: Request) => {
             );
           }
 
-          // Approved - create the task and send the message
+          // Approved - create the task and send (or schedule) the message
           const draft = approval.task_draft as Record<string, unknown>;
+          const dueDate = draft.due_date ? String(draft.due_date) : null;
+          const isScheduledForLater = dueDate && new Date(dueDate).getTime() > Date.now() + 60000;
+
+          // If scheduled for the future, store the exact message in gia_instruction for send-task-nudge to use
+          const giaInstructionForTask = isScheduledForLater
+            ? `ENVIAR_MENSAGEM_EXATA: ${approval.proposed_message}`
+            : String(draft.gia_instruction ?? "");
+
           const { data: createdTask } = await supabase
             .from("tasks")
             .insert({
@@ -477,18 +494,53 @@ Deno.serve(async (req: Request) => {
               group_name: draft.group_name ?? "",
               status: "pending",
               priority: draft.priority ?? "medium",
-              due_date: draft.due_date ?? null,
+              due_date: dueDate,
               recurrence: draft.recurrence ?? "none",
               recurrence_interval: draft.recurrence_interval ?? 1,
-              first_nudge_at: draft.first_nudge_at ?? null,
+              first_nudge_at: isScheduledForLater ? dueDate : (draft.first_nudge_at ?? null),
               nudge_repeat_hours: draft.nudge_repeat_hours ?? 0,
-              nudge_active: draft.nudge_active ?? false,
-              gia_instruction: draft.gia_instruction ?? "",
+              nudge_active: isScheduledForLater ? true : (draft.nudge_active ?? false),
+              gia_instruction: giaInstructionForTask,
             })
             .select()
             .maybeSingle();
 
-          // Send the proposed message to the contact
+          if (isScheduledForLater) {
+            // DON'T send now - it's scheduled for later
+            await supabase
+              .from("pending_message_approvals")
+              .update({ status: "approved", resolved_at: new Date().toISOString(), task_id: createdTask?.id ?? null })
+              .eq("id", approval.id);
+
+            if (apiUrlAppr && apiKeyAppr && instanceAppr) {
+              const numberAppr = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
+              const code = createdTask?.task_code ? ` ${createdTask.task_code}` : "";
+              const fmtSched = (iso: string) => {
+                const dt = new Date(iso);
+                const br = new Date(dt.getTime() - 3 * 60 * 60 * 1000);
+                const dd = String(br.getUTCDate()).padStart(2, "0");
+                const mm = String(br.getUTCMonth() + 1).padStart(2, "0");
+                const hh = String(br.getUTCHours()).padStart(2, "0");
+                const mi = String(br.getUTCMinutes()).padStart(2, "0");
+                const days = ["dom", "seg", "ter", "qua", "qui", "sex", "sab"];
+                return `${days[br.getUTCDay()]} ${dd}/${mm} as ${hh}:${mi}`;
+              };
+              const scheduleMsg = `Agendado${code}! Vou enviar para *${approval.assignee_name}* em ${fmtSched(dueDate)}. Pode ficar tranquilo.`;
+              await fetch(`${apiUrlAppr}/message/sendText/${instanceAppr}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json", apikey: apiKeyAppr },
+                body: JSON.stringify({ number: numberAppr, text: scheduleMsg }),
+              });
+            }
+
+            await logEvent("message-approval-scheduled", `approval=${approval.id} task=${createdTask?.id ?? ""} due=${dueDate}`);
+            return new Response(
+              JSON.stringify({ approved: true, scheduled: true, task_id: createdTask?.id, due_date: dueDate }),
+              { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
+          }
+
+          // Send the proposed message NOW to the contact
           if (apiUrlAppr && apiKeyAppr && instanceAppr && approval.proposed_message) {
             const isGroupAppr = String(approval.assignee_phone).includes("@g.us");
             let numberDest = isGroupAppr ? approval.assignee_phone : normalizePhone(approval.assignee_phone);

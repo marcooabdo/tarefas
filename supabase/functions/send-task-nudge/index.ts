@@ -72,6 +72,43 @@ Deno.serve(async (req: Request) => {
     }
 
     const giaInstruction = (task.gia_instruction ?? "").trim();
+
+    // Check if there's an exact message to send (from NL approval flow with scheduling)
+    const exactMsgMatch = /^ENVIAR_MENSAGEM_EXATA:\s*([\s\S]+)$/i.exec(giaInstruction);
+    if (exactMsgMatch) {
+      const exactMessage = exactMsgMatch[1].trim();
+      const isGroup = String(task.assignee_phone).includes("@g.us");
+      let number = isGroup ? task.assignee_phone : String(task.assignee_phone).replace(/\D/g, "");
+      if (!isGroup && number.length <= 11) number = "55" + number;
+
+      const sendRes = await fetch(`${apiUrl}/message/sendText/${instanceName}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", apikey: apiKey },
+        body: JSON.stringify({ number, text: exactMessage }),
+      });
+
+      await supabase.from("send_logs").insert({
+        task_id: task.id,
+        contact_name: task.assignee_name,
+        contact_phone: task.assignee_phone,
+        template_name: "Mensagem agendada (GIA NL)",
+        message_content: exactMessage,
+        status: sendRes.ok ? "sent" : "error",
+        error_message: sendRes.ok ? null : await sendRes.text(),
+        sent_at: new Date().toISOString(),
+      });
+
+      await supabase.from("tasks").update({
+        last_ai_nudge: new Date().toISOString(),
+        ai_interventions: (task.ai_interventions ?? 0) + 1,
+      }).eq("id", task.id);
+
+      return new Response(
+        JSON.stringify({ sent: true, exact_message: true, task_id: task.id }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
     const isSendOnly = giaInstruction && /\b(s[oó]\s*(envi|mand)|apenas\s*(envi|mand)|sem\s*(pedir|cobrar)|n[aã]o\s*(pe[cç]a|cobr|pedir)|marque\s*como\s*conclu)/i.test(giaInstruction);
 
     const descriptionText = task.description ? `\nDetalhes: ${task.description}` : "";
