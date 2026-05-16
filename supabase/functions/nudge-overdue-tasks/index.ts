@@ -47,7 +47,10 @@ Deno.serve(async (req: Request) => {
       .not("first_nudge_at", "is", null)
       .lte("first_nudge_at", nowIso);
 
+    const maxNudges = Number(settings["default_max_nudges"] || "0") || 0;
+
     const due_now = (tasks ?? []).filter((t) => {
+      if (maxNudges > 0 && (t.ai_interventions ?? 0) >= maxNudges) return false;
       if (!t.last_ai_nudge) return true;
       if (!t.nudge_repeat_hours || t.nudge_repeat_hours <= 0) return false;
       const lastMs = new Date(t.last_ai_nudge).getTime();

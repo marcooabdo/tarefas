@@ -479,7 +479,10 @@ Deno.serve(async (req: Request) => {
         }
 
         const due_date = parseDate(fields.due ?? "");
-        const first_nudge_at = parseDate(fields.nudge ?? "") ?? due_date;
+        let first_nudge_at = parseDate(fields.nudge ?? "") ?? due_date;
+
+        const defaultNudgeHours = Number(settingsGia["default_nudge_hours"] || "1") || 1;
+        const defaultRepeatHours = Number(settingsGia["default_repeat_hours"] || "4") || 4;
 
         const repeatRaw = (fields.repeat ?? "").toLowerCase();
         let nudge_repeat_hours = 0;
@@ -489,7 +492,15 @@ Deno.serve(async (req: Request) => {
         if (repH) nudge_repeat_hours = Number(repH[1]);
         else if (repMin) nudge_repeat_hours = Math.max(1, Math.round(Number(repMin[1]) / 60));
         else if (repD) nudge_repeat_hours = Number(repD[1]) * 24;
-        const nudge_active = Boolean(first_nudge_at);
+        else nudge_repeat_hours = defaultRepeatHours;
+
+        let nudge_active = Boolean(first_nudge_at);
+        if (!first_nudge_at && due_date) {
+          const dueMs = new Date(due_date).getTime();
+          const autoNudge = new Date(dueMs + defaultNudgeHours * 60 * 60 * 1000).toISOString();
+          first_nudge_at = autoNudge;
+          nudge_active = true;
+        }
 
         let assigneeName = settingsGia["owner_name"] || "Eu";
         let assigneePhone = normalizePhone(ownerPhone);

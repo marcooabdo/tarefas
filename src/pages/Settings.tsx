@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Save, Plug, CircleCheck as CheckCircle2, CircleAlert as AlertCircle, Eye, EyeOff, Webhook, Copy } from 'lucide-react';
+import { Save, Plug, CircleCheck as CheckCircle2, CircleAlert as AlertCircle, Eye, EyeOff, Webhook, Copy, Bell } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 
 interface SettingsState {
@@ -7,6 +7,9 @@ interface SettingsState {
   evolution_api_key: string;
   evolution_instance_name: string;
   gia_report_phone: string;
+  default_nudge_hours: string;
+  default_repeat_hours: string;
+  default_max_nudges: string;
 }
 
 export function Settings() {
@@ -15,6 +18,9 @@ export function Settings() {
     evolution_api_key: '',
     evolution_instance_name: '',
     gia_report_phone: '',
+    default_nudge_hours: '1',
+    default_repeat_hours: '4',
+    default_max_nudges: '0',
   });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -42,7 +48,10 @@ export function Settings() {
     const { data } = await supabase
       .from('app_settings')
       .select('key, value')
-      .in('key', ['evolution_api_url', 'evolution_api_key', 'evolution_instance_name', 'gia_report_phone']);
+      .in('key', [
+        'evolution_api_url', 'evolution_api_key', 'evolution_instance_name', 'gia_report_phone',
+        'default_nudge_hours', 'default_repeat_hours', 'default_max_nudges',
+      ]);
     const map: Record<string, string> = {};
     (data ?? []).forEach((s: any) => (map[s.key] = s.value));
     setSettings({
@@ -50,6 +59,9 @@ export function Settings() {
       evolution_api_key: map.evolution_api_key ?? '',
       evolution_instance_name: map.evolution_instance_name ?? '',
       gia_report_phone: map.gia_report_phone ?? '',
+      default_nudge_hours: map.default_nudge_hours ?? '1',
+      default_repeat_hours: map.default_repeat_hours ?? '4',
+      default_max_nudges: map.default_max_nudges ?? '0',
     });
     setLoading(false);
   }
@@ -401,6 +413,69 @@ export function Settings() {
               </button>
               <button className="neon-btn" disabled={webhookBusy} onClick={handleConfigureWebhook} type="button">
                 <Webhook size={14} /> {webhookBusy ? 'Configurando...' : 'Configurar webhook na Evolution'}
+              </button>
+            </div>
+          </section>
+
+          <section className="glass" style={{ padding: '26px', marginBottom: '18px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '22px' }}>
+              <div style={{
+                width: '42px', height: '42px', borderRadius: '11px',
+                background: 'linear-gradient(135deg, rgba(255,193,7,0.18), rgba(255,152,0,0.18))',
+                border: '1px solid rgba(255,193,7,0.35)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+              }}>
+                <Bell size={20} color="#ffc107" />
+              </div>
+              <div>
+                <h2 style={{ fontSize: '16px', fontWeight: 600, color: '#f4f6fb', margin: 0 }}>Cobranças de Tarefas</h2>
+                <p style={{ fontSize: '12px', color: '#9aa3b2', margin: '4px 0 0' }}>
+                  Configure os intervalos padrão de cobrança automática para novas tarefas.
+                </p>
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+              <Field label="Primeira cobrança após (horas)" hint="Quantas horas após o prazo vencer a GIA envia a primeira cobrança. Ex: 1 = cobra 1h depois do prazo.">
+                <input
+                  className="nx-input"
+                  type="number"
+                  min="0"
+                  step="1"
+                  placeholder="1"
+                  value={settings.default_nudge_hours}
+                  onChange={(e) => setSettings({ ...settings, default_nudge_hours: e.target.value })}
+                />
+              </Field>
+
+              <Field label="Repetir cobrança a cada (horas)" hint="Se não responder, a GIA repete a cobrança neste intervalo. Ex: 4 = cobra novamente a cada 4h.">
+                <input
+                  className="nx-input"
+                  type="number"
+                  min="0"
+                  step="1"
+                  placeholder="4"
+                  value={settings.default_repeat_hours}
+                  onChange={(e) => setSettings({ ...settings, default_repeat_hours: e.target.value })}
+                />
+              </Field>
+
+              <Field label="Limite de cobranças (0 = ilimitado)" hint="Quantas vezes no máximo a GIA deve cobrar antes de parar. 0 = cobra indefinidamente até responder.">
+                <input
+                  className="nx-input"
+                  type="number"
+                  min="0"
+                  step="1"
+                  placeholder="0"
+                  value={settings.default_max_nudges}
+                  onChange={(e) => setSettings({ ...settings, default_max_nudges: e.target.value })}
+                />
+              </Field>
+            </div>
+
+            <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '22px' }}>
+              <button className="neon-btn" disabled={saving} onClick={handleSave}>
+                <Save size={14} /> {saving ? 'Salvando...' : 'Salvar'}
               </button>
             </div>
           </section>
