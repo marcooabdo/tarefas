@@ -172,7 +172,8 @@ Deno.serve(async (req: Request) => {
       const pad2 = (n: number) => String(n).padStart(2, "0");
       const fmtDate = (iso: string) => {
         const d = new Date(iso);
-        return `${pad2(d.getDate())}/${pad2(d.getMonth() + 1)} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+        const br = new Date(d.getTime() - 3 * 60 * 60 * 1000);
+        return `${pad2(br.getUTCDate())}/${pad2(br.getUTCMonth() + 1)} ${pad2(br.getUTCHours())}:${pad2(br.getUTCMinutes())}`;
       };
       const nowStr = fmtDate(new Date().toISOString());
       const lines: string[] = [
