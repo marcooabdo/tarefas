@@ -423,8 +423,8 @@ Deno.serve(async (req: Request) => {
     }
 
     // Skip messages that are GIA's own responses (sent by the bot itself via Evolution API)
-    const isGiaOwnMessage = /Posso mandar\? Responda|Entendi!? Vou enviar|Mensagem enviada para|Cancelado\. Mensagem nao|Nao entendi a correcao|Encontrei estes contatos/i.test(text);
-    if (isGiaOwnMessage) {
+    const isGiaOwnMessage = /Posso mandar\? Responda|Entendi!? Vou enviar|Mensagem enviada para|Cancelado\. Mensagem nao|Nao entendi a correcao|Encontrei estes contatos|Agendado\s*ATOM-|Aqui (é|e) a GIA|Pronto!? .*enviada|Reagendado\s*ATOM-|Cobran.a enviada|Executive Advisor do Sr\./i.test(text);
+    if (isGiaOwnMessage && fromMe) {
       await logEvent("ignored-gia-own-message", text.slice(0, 60));
       return new Response(JSON.stringify({ ignored: true, reason: "gia_own_message" }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -1369,6 +1369,7 @@ REGRAS:
     }
 
     // Conversational fallback: owner sends a message that didn't match any specific handler
+    // ONLY process messages in the owner's self-chat (remoteJid = owner_phone)
     if (fromMe && remoteJid && text) {
       const { data: settingsChat } = await supabase.from("app_settings").select("key, value");
       const sChat: Record<string, string> = {};
@@ -1376,6 +1377,17 @@ REGRAS:
       const ownerPhoneChat = sChat["owner_phone"] ?? "";
       const incomingChat = remoteJid.split("@")[0];
       const isOwnerChat = ownerPhoneChat && phonesMatch(ownerPhoneChat, incomingChat);
+
+      // Anti-loop: check if this message was sent by the GIA itself (via API) recently
+      // If the last GIA reply was less than 15 seconds ago, skip to avoid infinite loop
+      const lastReplyTs = sChat["_gia_last_chat_reply_ts"] ?? "0";
+      const msSinceLastReply = Date.now() - Number(lastReplyTs);
+      if (isOwnerChat && msSinceLastReply < 15000) {
+        await logEvent("ignored-gia-own-reply", `ms_since=${msSinceLastReply}`);
+        return new Response(JSON.stringify({ ignored: true, reason: "anti_loop" }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
 
       if (isOwnerChat) {
         const openaiKeyChat = sChat["openai_api_key"] ?? "";
@@ -1552,6 +1564,8 @@ Se nao e uma acao especial, apenas responda normalmente como assistente.`;
                   headers: { "Content-Type": "application/json", apikey: apiKeyChat },
                   body: JSON.stringify({ number: numberReply, text: reply }),
                 });
+                // Anti-loop: record timestamp so the webhook ignores the echo
+                await supabase.from("app_settings").upsert({ key: "_gia_last_chat_reply_ts", value: String(Date.now()) }, { onConflict: "key" });
               }
             }
 
