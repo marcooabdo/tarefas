@@ -534,6 +534,225 @@ Deno.serve(async (req: Request) => {
       }
     }
 
+    // Handle pending approval EDIT/CORRECTION: owner sends a non-trivial message while approval is pending
+    // This catches cases like "Nao, envia assim: [new message]" or any conversational correction
+    if (text && remoteJid && text.trim().length > 3) {
+      const { data: pendingApprovalEdit } = await supabase
+        .from("pending_message_approvals")
+        .select("*")
+        .eq("owner_jid", remoteJid)
+        .eq("status", "pending")
+        .order("created_at", { ascending: false })
+        .limit(1);
+
+      if (pendingApprovalEdit && pendingApprovalEdit.length > 0) {
+        const approval = pendingApprovalEdit[0];
+        const { data: settingsEdit } = await supabase.from("app_settings").select("key, value");
+        const sEdit: Record<string, string> = {};
+        for (const row of settingsEdit ?? []) sEdit[row.key] = row.value;
+        const apiUrlEdit = sEdit["evolution_api_url"]?.replace(/\/$/, "");
+        const apiKeyEdit = sEdit["evolution_api_key"];
+        const instanceEdit = sEdit["evolution_instance_name"];
+        const openaiKeyEdit = sEdit["openai_api_key"] ?? "";
+        const openaiModelEdit = sEdit["openai_model"] || "gpt-4o-mini";
+
+        // Use GPT to understand what the owner wants
+        let newMessage = "";
+        let ownerIntent: "edit" | "cancel" | "approve" | "new_instruction" = "edit";
+
+        if (openaiKeyEdit) {
+          try {
+            const editPrompt = `Voce e a GIA, assistente executiva. O gestor tinha pedido para enviar esta mensagem para ${approval.assignee_name}:
+
+MENSAGEM ORIGINAL:
+"${approval.proposed_message}"
+
+O gestor respondeu com:
+"${text}"
+
+Analise a resposta do gestor e responda APENAS com JSON valido:
+{
+  "intent": "edit" ou "cancel" ou "approve" ou "new_instruction",
+  "new_message": "a nova mensagem corrigida para enviar (se intent=edit). Se o gestor forneceu o texto exato, use EXATAMENTE o que ele escreveu. Se ele deu instrucoes de como mudar, aplique as mudancas na mensagem original.",
+  "explanation": "explicacao curta do que o gestor quer"
+}
+
+REGRAS:
+- Se o gestor fornece uma versao corrigida da mensagem (ex: "Nao, envia assim: ..."), intent=edit e new_message = o texto corrigido que ele forneceu
+- Se o gestor diz pra cancelar/nao enviar, intent=cancel
+- Se o gestor aprova de alguma forma, intent=approve
+- Se o gestor da uma instrucao generica de mudanca (ex: "seja mais firme", "tira a parte do seguro"), intent=edit e voce deve aplicar a mudanca na mensagem original
+- IMPORTANTE: Se o gestor escreve a mensagem inteira de volta com correcoes, use EXATAMENTE o texto dele, nao invente nada
+- A new_message deve manter o tom profissional da GIA como assistente do gestor`;
+
+            const editRes = await fetch("https://api.openai.com/v1/chat/completions", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", Authorization: `Bearer ${openaiKeyEdit}` },
+              body: JSON.stringify({
+                model: openaiModelEdit,
+                temperature: 0.2,
+                messages: [
+                  { role: "system", content: "Voce interpreta correcoes/instrucoes do gestor para mensagens. Responda SOMENTE com JSON valido." },
+                  { role: "user", content: editPrompt },
+                ],
+              }),
+            });
+
+            if (editRes.ok) {
+              const editData = await editRes.json();
+              const rawEdit = String(editData?.choices?.[0]?.message?.content ?? "").trim();
+              const jsonEdit = rawEdit.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+              const parsed = JSON.parse(jsonEdit);
+              ownerIntent = parsed.intent || "edit";
+              newMessage = String(parsed.new_message || "").trim();
+            }
+          } catch { /* fallback: treat as literal replacement */ }
+        }
+
+        // Fallback: if GPT failed or no key, try to extract the message directly
+        if (!newMessage && ownerIntent === "edit") {
+          const directMsg = text.replace(/^[Nn][aã]o[,.]?\s*(envia|manda|fala|escreve)\s*(assim|isso|isso aqui)?[:\s]*/i, "").trim();
+          if (directMsg.length > 10) {
+            newMessage = directMsg;
+          }
+        }
+
+        if (ownerIntent === "cancel") {
+          await supabase
+            .from("pending_message_approvals")
+            .update({ status: "rejected", resolved_at: new Date().toISOString() })
+            .eq("id", approval.id);
+          if (apiUrlEdit && apiKeyEdit && instanceEdit) {
+            const numberEdit = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
+            await fetch(`${apiUrlEdit}/message/sendText/${instanceEdit}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", apikey: apiKeyEdit },
+              body: JSON.stringify({ number: numberEdit, text: "Cancelado. Mensagem nao enviada." }),
+            });
+          }
+          await logEvent("approval-edit-cancelled", `approval=${approval.id}`);
+          return new Response(
+            JSON.stringify({ approval_cancelled: true, id: approval.id }),
+            { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        if (ownerIntent === "approve") {
+          // Treat as approval - reuse the existing approval logic
+          const draft = approval.task_draft as Record<string, unknown>;
+          const { data: createdTask } = await supabase
+            .from("tasks")
+            .insert({
+              title: draft.title ?? "Tarefa sem título",
+              description: draft.description ?? "",
+              assignee_name: approval.assignee_name,
+              assignee_phone: approval.assignee_phone,
+              group_name: draft.group_name ?? "",
+              status: "pending",
+              priority: draft.priority ?? "medium",
+              due_date: draft.due_date ?? null,
+              recurrence: draft.recurrence ?? "none",
+              recurrence_interval: draft.recurrence_interval ?? 1,
+              first_nudge_at: draft.first_nudge_at ?? null,
+              nudge_repeat_hours: draft.nudge_repeat_hours ?? 0,
+              nudge_active: draft.nudge_active ?? false,
+              gia_instruction: draft.gia_instruction ?? "",
+            })
+            .select()
+            .maybeSingle();
+
+          if (apiUrlEdit && apiKeyEdit && instanceEdit && approval.proposed_message) {
+            const isGroupEdit = String(approval.assignee_phone).includes("@g.us");
+            let numberDest = isGroupEdit ? approval.assignee_phone : normalizePhone(approval.assignee_phone);
+            if (!isGroupEdit && numberDest.length <= 11) numberDest = "55" + numberDest;
+            await fetch(`${apiUrlEdit}/message/sendText/${instanceEdit}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", apikey: apiKeyEdit },
+              body: JSON.stringify({ number: numberDest, text: approval.proposed_message }),
+            });
+            await supabase.from("send_logs").insert({
+              contact_name: approval.assignee_name,
+              contact_phone: approval.assignee_phone,
+              template_name: "Mensagem aprovada (GIA NL)",
+              message_content: approval.proposed_message,
+              status: "sent",
+              sent_at: new Date().toISOString(),
+            });
+          }
+
+          await supabase
+            .from("pending_message_approvals")
+            .update({ status: "approved", resolved_at: new Date().toISOString(), task_id: createdTask?.id ?? null })
+            .eq("id", approval.id);
+
+          if (apiUrlEdit && apiKeyEdit && instanceEdit) {
+            const numberEdit = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
+            const code = createdTask?.task_code ? ` ${createdTask.task_code}` : "";
+            await fetch(`${apiUrlEdit}/message/sendText/${instanceEdit}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", apikey: apiKeyEdit },
+              body: JSON.stringify({ number: numberEdit, text: `Mensagem enviada para *${approval.assignee_name}*${code}. Estou acompanhando.` }),
+            });
+          }
+
+          await logEvent("approval-edit-approved", `approval=${approval.id}`);
+          return new Response(
+            JSON.stringify({ approved: true, task_id: createdTask?.id }),
+            { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // ownerIntent === "edit" or "new_instruction" - update the message and re-ask
+        if (newMessage) {
+          await supabase
+            .from("pending_message_approvals")
+            .update({ proposed_message: newMessage })
+            .eq("id", approval.id);
+
+          if (apiUrlEdit && apiKeyEdit && instanceEdit) {
+            const numberEdit = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
+            const draft = approval.task_draft as Record<string, unknown>;
+            const shouldNudge = draft.nudge_active ?? false;
+            const reAskMsg =
+              `Entendi! Vou enviar para *${approval.assignee_name}*:\n\n` +
+              `---\n${newMessage}\n---\n\n` +
+              (shouldNudge ? `Cobranca ativa: vou acompanhar e cobrar respostas.\n` : `Sem cobranca: apenas envio sem cobrar resposta.\n`) +
+              `\nPosso mandar? Responda *ok* para aprovar ou *nao* para cancelar.`;
+            await fetch(`${apiUrlEdit}/message/sendText/${instanceEdit}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", apikey: apiKeyEdit },
+              body: JSON.stringify({ number: numberEdit, text: reAskMsg }),
+            });
+          }
+
+          await logEvent("approval-message-edited", `approval=${approval.id}`);
+          return new Response(
+            JSON.stringify({ edited: true, id: approval.id, new_message: newMessage }),
+            { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // If we couldn't parse the edit, ask for clarification
+        if (apiUrlEdit && apiKeyEdit && instanceEdit) {
+          const numberEdit = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
+          await fetch(`${apiUrlEdit}/message/sendText/${instanceEdit}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", apikey: apiKeyEdit },
+            body: JSON.stringify({
+              number: numberEdit,
+              text: `Nao entendi a correcao. Voce pode:\n- Enviar a mensagem corrigida por completo\n- Responder *ok* para aprovar como esta\n- Responder *nao* para cancelar`,
+            }),
+          });
+        }
+
+        await logEvent("approval-edit-unclear", `approval=${approval.id}`);
+        return new Response(
+          JSON.stringify({ unclear_edit: true, id: approval.id }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+    }
+
     // Command: "GIA relatorio" / "GIA me de o relatorio" triggers daily report
     const reportMatch = /^\s*GIA\s*[\s:,]+.*(relat[oó]rio|report|resumo\s+di[aá]rio)/i.test(text);
     if (reportMatch && remoteJid) {
@@ -854,7 +1073,16 @@ Deno.serve(async (req: Request) => {
 
         if (openaiKeyNL) {
           const freeText = giaNLMatch[1].trim();
+          const nowBR = new Date(Date.now() - 3 * 60 * 60 * 1000);
+          const todayISO = nowBR.toISOString().slice(0, 10);
+          const dayNames = ["domingo", "segunda-feira", "terca-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sabado"];
+          const todayDayName = dayNames[nowBR.getUTCDay()];
+          const ownerName = sNL["owner_name"] || "o gestor";
+
           const parsePrompt = `Voce e a GIA, assistente executiva. O gestor enviou este comando por WhatsApp em linguagem natural. Extraia as informacoes estruturadas.
+
+HOJE: ${todayISO} (${todayDayName})
+NOME DO GESTOR: ${ownerName}
 
 COMANDO: "${freeText}"
 
@@ -863,20 +1091,27 @@ Responda APENAS com JSON valido (sem markdown, sem crase), com estes campos:
   "title": "titulo curto da tarefa/acao (max 80 chars)",
   "description": "descricao completa do que fazer",
   "assignee": "nome da pessoa destinataria (se mencionada, senao vazio)",
+  "assignees": ["lista de nomes se houver MULTIPLOS destinatarios, senao array vazio"],
   "priority": "high/medium/low",
-  "due_date_text": "texto do prazo se mencionado, senao vazio",
-  "recurrence": "none/daily/weekly/monthly",
-  "nudge": "true se deve cobrar resposta, false se e so envio sem cobranca",
+  "due_date_iso": "data e hora de envio/prazo em formato ISO 8601 (ex: 2026-05-19T08:30:00). Calcule com base na data de HOJE. Se 'segunda-feira' e hoje e sexta, calcule a proxima segunda. Se nao ha prazo, vazio.",
+  "recurrence": "none/daily/weekly/monthly/weekdays",
+  "recurrence_interval": 1,
+  "nudge": true,
   "instruction": "instrucao de COMO a GIA deve agir - ex: 'seja firme', 'apenas envie sem pedir resposta', 'cobre normalmente'",
   "proposed_message": "a mensagem EXATA que a GIA deve enviar para o destinatario, escrita de forma natural como se fosse a assistente do gestor falando com a pessoa"
 }
 
 REGRAS:
 - Se o gestor quer ENVIAR uma mensagem (perguntar algo, pedir algo, avisar), o proposed_message deve ser essa mensagem escrita de forma profissional e cordial
-- Se o gestor quer COBRAR algo, a instrucao deve refletir o tom (firme, educado, etc)
-- O proposed_message deve ser escrito na primeira pessoa como assistente do gestor (Ex: "Ola! Aqui e a GIA, assistente do Sr. Marco. Ele gostaria de saber...")
+- Se o gestor quer COBRAR algo, nudge=true e a instrucao deve refletir o tom (firme, educado, etc)
+- O proposed_message deve ser escrito na primeira pessoa como assistente do gestor (Ex: "Ola! Aqui e a GIA, assistente do Sr. ${ownerName}. Ele gostaria de saber...")
 - Se nao ha destinatario claro, deixe assignee vazio
-- Se nao ha prazo, deixe due_date_text vazio`;
+- Se o gestor menciona dia da semana (ex: "na segunda-feira"), calcule a data ISO correta a partir de hoje ${todayISO}
+- Se o gestor menciona horario (ex: "08:30hr"), inclua no due_date_iso
+- Se o gestor quer enviar para VARIOS contatos/pessoas, liste em "assignees"
+- Se e uma tarefa recorrente (ex: "toda segunda", "todo dia"), defina recurrence adequadamente
+- nudge=true significa que a GIA vai cobrar resposta depois. nudge=false e so envio unico sem cobranca
+- Se o gestor da instrucoes especificas de como enviar, coloque em instruction`;
 
           try {
             const parseRes = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -901,12 +1136,36 @@ REGRAS:
               const title = String(parsed.title || "").slice(0, 200) || "Tarefa sem título";
               const description = String(parsed.description || "");
               const assigneeRaw = String(parsed.assignee || "").trim();
+              const assigneesRaw: string[] = Array.isArray(parsed.assignees) ? parsed.assignees.filter((a: unknown) => typeof a === "string" && a.trim()) : [];
               const priority = /alta|high|urgente/.test(String(parsed.priority || "")) ? "high" : /baixa|low/.test(String(parsed.priority || "")) ? "low" : "medium";
               const instruction = String(parsed.instruction || "");
               const proposedMessage = String(parsed.proposed_message || "");
               const shouldNudge = parsed.nudge !== false && parsed.nudge !== "false";
               const recurrenceRaw = String(parsed.recurrence || "none").toLowerCase();
-              const recurrence = /daily|diari/.test(recurrenceRaw) ? "daily" : /weekly|seman/.test(recurrenceRaw) ? "weekly" : /monthly|mens/.test(recurrenceRaw) ? "monthly" : "none";
+              const recurrence = /daily|diari/.test(recurrenceRaw) ? "daily" : /weekly|seman/.test(recurrenceRaw) ? "weekly" : /monthly|mens/.test(recurrenceRaw) ? "monthly" : /weekdays|[uú]te/.test(recurrenceRaw) ? "weekdays" : "none";
+              const recurrenceInterval = Math.max(1, Number(parsed.recurrence_interval) || 1);
+
+              // Parse due_date from ISO output
+              let dueDateNL: string | null = null;
+              const dueDateIso = String(parsed.due_date_iso || "").trim();
+              if (dueDateIso) {
+                try {
+                  const d = new Date(dueDateIso);
+                  if (!isNaN(d.getTime())) {
+                    // Convert from BRT to UTC (add 3 hours)
+                    const utcMs = d.getTime() + 3 * 60 * 60 * 1000;
+                    dueDateNL = new Date(utcMs).toISOString();
+                  }
+                } catch { /* ignore bad dates */ }
+              }
+
+              // Calculate first_nudge_at based on due_date
+              let firstNudgeNL: string | null = dueDateNL;
+              const defaultRepeatHoursNL = Number(sNL["default_repeat_hours"] || "4") || 4;
+              if (!firstNudgeNL && shouldNudge) {
+                // If no due date but nudge active, set nudge for 1 hour after now
+                firstNudgeNL = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+              }
 
               // Resolve assignee
               let assigneeName = sNL["owner_name"] || "Eu";
@@ -943,7 +1202,7 @@ REGRAS:
                     }));
                     const confirmationNeeded = await askConfirmation(
                       supabase, sNL, remoteJid, assigneeRaw, candidates,
-                      { title, description, priority, due_date: null, recurrence, recurrence_interval: 1, first_nudge_at: null, nudge_repeat_hours: shouldNudge ? 4 : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true }
+                      { title, description, priority, due_date: dueDateNL, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: firstNudgeNL, nudge_repeat_hours: shouldNudge ? defaultRepeatHoursNL : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true }
                     );
                     if (confirmationNeeded) {
                       await logEvent("gia-nl-awaiting-confirmation", `assignee="${assigneeRaw}"`);
@@ -959,7 +1218,7 @@ REGRAS:
                   if (whatsappCandidates.length > 0) {
                     const confirmationNeeded = await askConfirmation(
                       supabase, sNL, remoteJid, assigneeRaw, whatsappCandidates,
-                      { title, description, priority, due_date: null, recurrence, recurrence_interval: 1, first_nudge_at: null, nudge_repeat_hours: shouldNudge ? 4 : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true }
+                      { title, description, priority, due_date: dueDateNL, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: firstNudgeNL, nudge_repeat_hours: shouldNudge ? defaultRepeatHoursNL : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true }
                     );
                     if (confirmationNeeded) {
                       await logEvent("gia-nl-awaiting-confirmation", `assignee="${assigneeRaw}" whatsapp`);
@@ -993,9 +1252,9 @@ REGRAS:
               // If we got here, assignee is resolved. Create approval request.
               if (proposedMessage && assigneeName !== (sNL["owner_name"] || "Eu")) {
                 const taskDraft = {
-                  title, description, priority, recurrence, recurrence_interval: 1,
-                  due_date: null, first_nudge_at: null,
-                  nudge_repeat_hours: shouldNudge ? (Number(sNL["default_repeat_hours"] || "4") || 4) : 0,
+                  title, description, priority, recurrence, recurrence_interval: recurrenceInterval,
+                  due_date: dueDateNL, first_nudge_at: firstNudgeNL,
+                  nudge_repeat_hours: shouldNudge ? defaultRepeatHoursNL : 0,
                   nudge_active: shouldNudge,
                   gia_instruction: instruction,
                   group_name: groupName,
@@ -1016,11 +1275,25 @@ REGRAS:
                 const instanceNL = sNL["evolution_instance_name"];
                 if (apiUrlNL && apiKeyNL && instanceNL) {
                   const numberOwner = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
+                  const fmtDateNL = (iso: string | null) => {
+                    if (!iso) return "";
+                    const dt = new Date(iso);
+                    const br = new Date(dt.getTime() - 3 * 60 * 60 * 1000);
+                    const dd = String(br.getUTCDate()).padStart(2, "0");
+                    const mm = String(br.getUTCMonth() + 1).padStart(2, "0");
+                    const hh = String(br.getUTCHours()).padStart(2, "0");
+                    const mi = String(br.getUTCMinutes()).padStart(2, "0");
+                    const days = ["dom", "seg", "ter", "qua", "qui", "sex", "sab"];
+                    return `${days[br.getUTCDay()]} ${dd}/${mm} ${hh}:${mi}`;
+                  };
+                  const scheduleInfo = dueDateNL ? `\nAgendado para: ${fmtDateNL(dueDateNL)}` : "";
+                  const recurrenceInfo = recurrence !== "none" ? `\nRecorrencia: ${recurrence}${recurrenceInterval > 1 ? ` x${recurrenceInterval}` : ""}` : "";
                   const approvalMsg =
                     `Entendi! Vou enviar para *${assigneeName}*:\n\n` +
                     `---\n${proposedMessage}\n---\n\n` +
                     (shouldNudge ? `Cobranca ativa: vou acompanhar e cobrar respostas.\n` : `Sem cobranca: apenas envio sem cobrar resposta.\n`) +
-                    `\nPosso mandar? Responda *ok* para aprovar ou *nao* para cancelar.`;
+                    scheduleInfo + recurrenceInfo +
+                    `\n\nPosso mandar? Responda *ok* para aprovar ou *nao* para cancelar.`;
                   await fetch(`${apiUrlNL}/message/sendText/${instanceNL}`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json", apikey: apiKeyNL },
