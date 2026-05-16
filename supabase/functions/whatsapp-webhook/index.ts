@@ -387,6 +387,34 @@ Deno.serve(async (req: Request) => {
       }
     }
 
+    // Command: "GIA relatorio" / "GIA me de o relatorio" triggers daily report
+    const reportMatch = /^\s*GIA\s*[\s:,]+.*(relat[oó]rio|report|resumo\s+di[aá]rio)/i.test(text);
+    if (reportMatch && remoteJid) {
+      const { data: settingsRowsRpt } = await supabase.from("app_settings").select("key, value");
+      const sRpt: Record<string, string> = {};
+      for (const row of settingsRowsRpt ?? []) sRpt[row.key] = row.value;
+      const ownerPhoneRpt = sRpt["owner_phone"] ?? "";
+      const incomingRpt = remoteJid.split("@")[0];
+      const isOwnerRpt = ownerPhoneRpt && phonesMatch(ownerPhoneRpt, incomingRpt);
+
+      if (isOwnerRpt) {
+        const reportUrl = `${Deno.env.get("SUPABASE_URL")}/functions/v1/report-overdue-tasks`;
+        await fetch(reportUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+          },
+          body: JSON.stringify({}),
+        });
+        await logEvent("report-triggered", "Owner requested daily report via command");
+        return new Response(
+          JSON.stringify({ action: "report-triggered" }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+    }
+
     const giaMatch = /^\s*GIA\s*:\s*([\s\S]+)$/i.exec(text);
     if (giaMatch && remoteJid) {
       const { data: settingsRowsGia } = await supabase.from("app_settings").select("key, value");

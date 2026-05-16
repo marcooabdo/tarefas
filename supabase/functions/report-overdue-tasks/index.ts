@@ -27,15 +27,12 @@ function timeDiff(dueIso: string, nowMs: number): string {
   if (hours >= 24) {
     const days = Math.floor(hours / 24);
     const remH = hours % 24;
-    const label = diffMs > 0 ? "faltam" : "vencida ha";
-    return `${label} ${days}d ${remH}h`;
+    return diffMs > 0 ? `faltam ${days}d ${remH}h` : `vencida ha ${days}d ${remH}h`;
   }
   if (hours > 0) {
-    const label = diffMs > 0 ? "faltam" : "vencida ha";
-    return `${label} ${hours}h${minutes > 0 ? `${minutes}m` : ""}`;
+    return diffMs > 0 ? `faltam ${hours}h${minutes > 0 ? `${minutes}m` : ""}` : `vencida ha ${hours}h${minutes > 0 ? `${minutes}m` : ""}`;
   }
-  const label = diffMs > 0 ? "faltam" : "vencida ha";
-  return `${label} ${minutes}m`;
+  return diffMs > 0 ? `faltam ${minutes}m` : `vencida ha ${minutes}m`;
 }
 
 Deno.serve(async (req: Request) => {
@@ -57,6 +54,8 @@ Deno.serve(async (req: Request) => {
     const apiKey = settings["evolution_api_key"];
     const instanceName = settings["evolution_instance_name"];
     const reportPhone = settings["gia_report_phone"] || settings["owner_phone"];
+    const openaiKey = settings["openai_api_key"] ?? "";
+    const openaiModel = settings["openai_model"] || "gpt-4o-mini";
 
     if (!apiUrl || !apiKey || !instanceName) {
       return new Response(
@@ -79,7 +78,7 @@ Deno.serve(async (req: Request) => {
     const brNow = new Date(now - 3 * 60 * 60 * 1000);
     const todayStart = new Date(Date.UTC(
       brNow.getUTCFullYear(), brNow.getUTCMonth(), brNow.getUTCDate(), 3, 0, 0
-    )).toISOString(); // 00:00 BRT = 03:00 UTC
+    )).toISOString();
 
     // Completed today
     const { data: completedTasks } = await supabase
@@ -89,7 +88,7 @@ Deno.serve(async (req: Request) => {
       .gte("completed_at", todayStart)
       .order("completed_at", { ascending: false });
 
-    // Pending/in_progress tasks (not completed)
+    // Pending tasks (not completed)
     const { data: pendingTasks } = await supabase
       .from("tasks")
       .select("*")
@@ -103,84 +102,185 @@ Deno.serve(async (req: Request) => {
     const upcoming = pending.filter((t) => t.due_date && new Date(t.due_date).getTime() >= now);
     const noDue = pending.filter((t) => !t.due_date);
 
-    const lines: string[] = [];
-    lines.push(`*RELATORIO DIARIO - GIA*`);
-    lines.push(`${fmtDate(nowIso)}`);
-    lines.push(``);
+    // Build structured data for ChatGPT
+    const completedSummary = completed.map((t) => ({
+      titulo: t.title,
+      descricao: t.description || "",
+      responsavel: t.assignee_name || "Sem responsavel",
+      concluida_em: t.completed_at ? fmtDate(t.completed_at) : "hoje",
+      codigo: t.task_code || null,
+    }));
 
-    // --- Completed section ---
-    if (completed.length > 0) {
-      lines.push(`*CONCLUIDAS HOJE (${completed.length})*`);
-      lines.push(``);
-      for (const t of completed) {
-        const who = t.assignee_name || "Sem responsavel";
-        const code = t.task_code ? ` [${t.task_code}]` : "";
-        const completedAt = t.completed_at ? fmtDate(t.completed_at) : "";
-        lines.push(`  ${t.title}${code}`);
-        lines.push(`  Por: ${who} as ${completedAt}`);
-        lines.push(``);
+    const overdueSummary = overdue.map((t) => ({
+      titulo: t.title,
+      descricao: t.description || "",
+      responsavel: t.assignee_name || "Sem responsavel",
+      prazo: t.due_date ? fmtDate(t.due_date) : null,
+      atraso: t.due_date ? timeDiff(t.due_date, now) : null,
+      status: t.status === "in_progress" ? "em execucao" : t.status === "blocked" ? "bloqueada" : "pendente",
+      codigo: t.task_code || null,
+      prioridade: t.priority || "medium",
+    }));
+
+    const upcomingSummary = upcoming.map((t) => ({
+      titulo: t.title,
+      descricao: t.description || "",
+      responsavel: t.assignee_name || "Sem responsavel",
+      prazo: t.due_date ? fmtDate(t.due_date) : null,
+      tempo_restante: t.due_date ? timeDiff(t.due_date, now) : null,
+      status: t.status === "in_progress" ? "em execucao" : "pendente",
+      codigo: t.task_code || null,
+      prioridade: t.priority || "medium",
+    }));
+
+    const noDueSummary = noDue.map((t) => ({
+      titulo: t.title,
+      descricao: t.description || "",
+      responsavel: t.assignee_name || "Sem responsavel",
+      status: t.status === "in_progress" ? "em execucao" : "pendente",
+      codigo: t.task_code || null,
+    }));
+
+    const dataPayload = JSON.stringify({
+      data_relatorio: fmtDate(nowIso),
+      concluidas_hoje: completedSummary,
+      vencidas: overdueSummary,
+      pendentes_com_prazo: upcomingSummary,
+      sem_prazo: noDueSummary,
+      totais: {
+        concluidas: completed.length,
+        vencidas: overdue.length,
+        pendentes: upcoming.length,
+        sem_prazo: noDue.length,
+      },
+    });
+
+    let message: string;
+
+    if (openaiKey) {
+      const gptRes = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${openaiKey}`,
+        },
+        body: JSON.stringify({
+          model: openaiModel,
+          temperature: 0.7,
+          max_tokens: 2000,
+          messages: [
+            {
+              role: "system",
+              content: `Voce e a GIA, assistente de gestao de tarefas via WhatsApp. Escreva um relatorio diario COMPLETO e DETALHADO para o gestor.
+
+REGRAS:
+- Use emojis adequados para cada secao e status
+- Use formatacao WhatsApp: *negrito*, _italico_
+- Seja detalhista: explique o que e cada tarefa, quem e responsavel, prazo exato, quanto tempo venceu ou falta
+- Para tarefas vencidas, destaque a gravidade com emojis de alerta
+- Para concluidas, celebre com emojis positivos
+- Inclua um resumo executivo no inicio
+- Inclua uma frase motivacional ou insight no final
+- Organize por secoes claras com separadores visuais
+- Formato: texto corrido formatado para WhatsApp (nao use markdown de tabela)
+- Nao use crase tripla ou blocos de codigo
+- Escreva em portugues brasileiro informal-profissional
+- Se nao houver tarefas em alguma categoria, mencione brevemente
+- Maximo 2000 caracteres`,
+            },
+            {
+              role: "user",
+              content: `Gere o relatorio diario com base nestes dados:\n\n${dataPayload}`,
+            },
+          ],
+        }),
+      });
+
+      if (gptRes.ok) {
+        const gptData = await gptRes.json();
+        message = gptData.choices?.[0]?.message?.content?.trim() ?? "";
+      } else {
+        message = "";
       }
     } else {
-      lines.push(`*CONCLUIDAS HOJE: nenhuma*`);
-      lines.push(``);
+      message = "";
     }
 
-    lines.push(`---`);
-    lines.push(``);
-
-    // --- Overdue section ---
-    if (overdue.length > 0) {
-      lines.push(`*VENCIDAS (${overdue.length})*`);
+    // Fallback if no OpenAI key or GPT failed
+    if (!message) {
+      const lines: string[] = [];
+      lines.push(`📊 *RELATÓRIO DIÁRIO - GIA*`);
+      lines.push(`📅 ${fmtDate(nowIso)}`);
       lines.push(``);
-      for (const t of overdue) {
-        const who = t.assignee_name || "Sem responsavel";
-        const code = t.task_code ? ` [${t.task_code}]` : "";
-        const diff = timeDiff(t.due_date, now);
-        const statusLabel = t.status === "in_progress" ? " (em execucao)" : t.status === "blocked" ? " (bloqueada)" : "";
-        lines.push(`  ${t.title}${code}${statusLabel}`);
-        lines.push(`  Para: ${who} | Prazo: ${fmtDate(t.due_date)} (${diff})`);
+
+      if (completed.length > 0) {
+        lines.push(`✅ *CONCLUÍDAS HOJE (${completed.length})*`);
+        lines.push(``);
+        for (const t of completed) {
+          const who = t.assignee_name || "Sem responsável";
+          const code = t.task_code ? ` [${t.task_code}]` : "";
+          const at = t.completed_at ? fmtDate(t.completed_at) : "";
+          lines.push(`  ✔️ *${t.title}*${code}`);
+          if (t.description) lines.push(`     ${t.description.slice(0, 80)}`);
+          lines.push(`     👤 ${who} às ${at}`);
+          lines.push(``);
+        }
+      } else {
+        lines.push(`✅ *CONCLUÍDAS HOJE:* nenhuma`);
         lines.push(``);
       }
-    }
 
-    // --- Upcoming section ---
-    if (upcoming.length > 0) {
-      lines.push(`*PENDENTES COM PRAZO (${upcoming.length})*`);
+      lines.push(`━━━━━━━━━━━━━━━━━━`);
       lines.push(``);
-      for (const t of upcoming) {
-        const who = t.assignee_name || "Sem responsavel";
-        const code = t.task_code ? ` [${t.task_code}]` : "";
-        const diff = timeDiff(t.due_date, now);
-        const statusLabel = t.status === "in_progress" ? " (em execucao)" : "";
-        lines.push(`  ${t.title}${code}${statusLabel}`);
-        lines.push(`  Para: ${who} | Prazo: ${fmtDate(t.due_date)} (${diff})`);
+
+      if (overdue.length > 0) {
+        lines.push(`🚨 *VENCIDAS (${overdue.length})*`);
         lines.push(``);
+        for (const t of overdue) {
+          const who = t.assignee_name || "Sem responsável";
+          const code = t.task_code ? ` [${t.task_code}]` : "";
+          const diff = timeDiff(t.due_date, now);
+          lines.push(`  ⚠️ *${t.title}*${code}`);
+          if (t.description) lines.push(`     ${t.description.slice(0, 80)}`);
+          lines.push(`     👤 ${who} | ⏰ ${fmtDate(t.due_date)} (${diff})`);
+          lines.push(``);
+        }
       }
-    }
 
-    // --- No due date section ---
-    if (noDue.length > 0) {
-      lines.push(`*SEM PRAZO (${noDue.length})*`);
-      lines.push(``);
-      for (const t of noDue) {
-        const who = t.assignee_name || "Sem responsavel";
-        const code = t.task_code ? ` [${t.task_code}]` : "";
-        lines.push(`  ${t.title}${code}`);
-        lines.push(`  Para: ${who}`);
+      if (upcoming.length > 0) {
+        lines.push(`⏳ *PENDENTES COM PRAZO (${upcoming.length})*`);
         lines.push(``);
+        for (const t of upcoming) {
+          const who = t.assignee_name || "Sem responsável";
+          const code = t.task_code ? ` [${t.task_code}]` : "";
+          const diff = timeDiff(t.due_date, now);
+          lines.push(`  📌 *${t.title}*${code}`);
+          if (t.description) lines.push(`     ${t.description.slice(0, 80)}`);
+          lines.push(`     👤 ${who} | ⏰ ${fmtDate(t.due_date)} (${diff})`);
+          lines.push(``);
+        }
       }
-    }
 
-    if (pending.length === 0) {
-      lines.push(`*PENDENTES: nenhuma*`);
+      if (noDue.length > 0) {
+        lines.push(`📋 *SEM PRAZO (${noDue.length})*`);
+        lines.push(``);
+        for (const t of noDue) {
+          const who = t.assignee_name || "Sem responsável";
+          const code = t.task_code ? ` [${t.task_code}]` : "";
+          lines.push(`  📌 *${t.title}*${code}`);
+          lines.push(`     👤 ${who}`);
+          lines.push(``);
+        }
+      }
+
+      lines.push(`━━━━━━━━━━━━━━━━━━`);
+      lines.push(`📈 *Resumo:* ${completed.length} concluída(s), ${overdue.length} vencida(s), ${upcoming.length + noDue.length} pendente(s)`);
       lines.push(``);
+      lines.push(`_Relatório gerado automaticamente pela GIA_ 🤖`);
+
+      message = lines.join("\n");
     }
 
-    lines.push(`---`);
-    lines.push(`Total: ${completed.length} concluida(s), ${overdue.length} vencida(s), ${upcoming.length + noDue.length} pendente(s)`);
-    lines.push(`_Relatorio gerado automaticamente pela GIA._`);
-
-    const message = lines.join("\n");
     const number = String(reportPhone).replace(/\D/g, "");
 
     const sendRes = await fetch(`${apiUrl}/message/sendText/${instanceName}`, {
