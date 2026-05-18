@@ -474,13 +474,15 @@ Deno.serve(async (req: Request) => {
           // Approved - create the task and send (or schedule) the message
           const draft = approval.task_draft as Record<string, unknown>;
           const dueDate = draft.due_date ? String(draft.due_date) : null;
+          const scheduledSend = draft.scheduled_send ? String(draft.scheduled_send) : null;
           const draftSendNow = draft.send_now === true || draft.send_now === "true";
-          // Only schedule for later if due_date is future AND send_now is NOT true
-          const isScheduledForLater = dueDate && !draftSendNow && new Date(dueDate).getTime() > Date.now() + 60000;
+          // Schedule for later if there's a scheduled_send time in the future
+          const isScheduledForLater = scheduledSend && new Date(scheduledSend).getTime() > Date.now() + 60000;
 
           // If scheduled for the future, store the exact message in gia_instruction for send-task-nudge to use
+          // Format: ENVIAR_MENSAGEM_EXATA:[PRAZO:iso|NUDGE_HOURS:n|INSTRUCTION:text] message
           const giaInstructionForTask = isScheduledForLater
-            ? `ENVIAR_MENSAGEM_EXATA: ${approval.proposed_message}`
+            ? `ENVIAR_MENSAGEM_EXATA:${hasDeadlineSeparateFromSend ? `[PRAZO:${dueDate}|NUDGE_HOURS:${draft.nudge_repeat_hours ?? 4}|INSTRUCTION:${String(draft.gia_instruction ?? "")}]` : ""} ${approval.proposed_message}`
             : String(draft.gia_instruction ?? "");
 
           const { data: createdTask } = await supabase
@@ -493,16 +495,19 @@ Deno.serve(async (req: Request) => {
               group_name: draft.group_name ?? "",
               status: "pending",
               priority: draft.priority ?? "medium",
-              due_date: dueDate,
+              due_date: isScheduledForLater ? scheduledSend : (dueDate ?? null),
               recurrence: draft.recurrence ?? "none",
               recurrence_interval: draft.recurrence_interval ?? 1,
-              first_nudge_at: dueDate ?? (draft.first_nudge_at ?? null),
+              first_nudge_at: isScheduledForLater ? scheduledSend : (dueDate ?? (draft.first_nudge_at ?? null)),
               nudge_repeat_hours: draft.nudge_repeat_hours ?? 0,
-              nudge_active: dueDate ? true : (draft.nudge_active ?? false),
+              nudge_active: isScheduledForLater ? true : (dueDate ? true : (draft.nudge_active ?? false)),
               gia_instruction: giaInstructionForTask,
             })
             .select()
             .maybeSingle();
+
+          // After task created, if there's a separate deadline, store it for post-send update
+          const hasDeadlineSeparateFromSend = isScheduledForLater && dueDate && dueDate !== scheduledSend;
 
           if (isScheduledForLater) {
             // DON'T send now - it's scheduled for later
@@ -524,7 +529,12 @@ Deno.serve(async (req: Request) => {
                 const days = ["dom", "seg", "ter", "qua", "qui", "sex", "sab"];
                 return `${days[br.getUTCDay()]} ${dd}/${mm} as ${hh}:${mi}`;
               };
-              const scheduleMsg = `Agendado${code}! Vou enviar para *${approval.assignee_name}* em ${fmtSched(dueDate)}. Pode ficar tranquilo.`;
+              let scheduleMsg = `Agendado${code}! Vou enviar para *${approval.assignee_name}* em ${fmtSched(scheduledSend)}.`;
+              if (hasDeadlineSeparateFromSend) {
+                scheduleMsg += `\nPrazo final da tarefa: ${fmtSched(dueDate)}.`;
+                scheduleMsg += `\nCobranca ativa apos o prazo.`;
+              }
+              scheduleMsg += ` Pode ficar tranquilo.`;
               await fetch(`${apiUrlAppr}/message/sendText/${instanceAppr}`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json", apikey: apiKeyAppr },
@@ -532,7 +542,7 @@ Deno.serve(async (req: Request) => {
               });
             }
 
-            await logEvent("message-approval-scheduled", `approval=${approval.id} task=${createdTask?.id ?? ""} due=${dueDate}`);
+            await logEvent("message-approval-scheduled", `approval=${approval.id} task=${createdTask?.id ?? ""} send=${scheduledSend} due=${dueDate}`);
             return new Response(
               JSON.stringify({ approved: true, scheduled: true, task_id: createdTask?.id, due_date: dueDate }),
               { headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -1146,13 +1156,13 @@ Responda APENAS com JSON valido (sem markdown, sem crase), com estes campos:
   "assignees": ["lista de nomes se houver MULTIPLOS destinatarios, senao array vazio"],
   "is_group": false,
   "priority": "high/medium/low",
-  "due_date_iso": "data e hora do PRAZO FINAL da tarefa em formato ISO 8601 (ex: 2026-05-19T08:30:00). Este e o prazo para a pessoa CONCLUIR a tarefa, NAO o horario de envio da mensagem. Calcule com base na data de HOJE. Se 'segunda-feira' e hoje e sexta, calcule a proxima segunda. Se nao ha prazo, vazio.",
-  "send_now": true,
+  "scheduled_send_iso": "data e hora de QUANDO A MENSAGEM deve ser ENVIADA, em ISO 8601. Se 'envia amanha 08:30' -> amanha 08:30. Se 'envia agora' ou nao especifica -> vazio (envio imediato).",
+  "due_date_iso": "data e hora do PRAZO FINAL da tarefa (quando a pessoa deve ter CONCLUIDO). Pode ser diferente do scheduled_send_iso. Se nao ha prazo, vazio.",
   "recurrence": "none/daily/weekly/monthly/weekdays",
   "recurrence_interval": 1,
   "nudge": true,
   "instruction": "instrucao de COMO a GIA deve agir - ex: 'seja firme', 'apenas envie sem pedir resposta', 'cobre normalmente'",
-  "proposed_message": "a mensagem EXATA que a GIA deve enviar para o destinatario, escrita de forma natural como se fosse a assistente do gestor falando com a pessoa/grupo"
+  "proposed_message": "a mensagem EXATA que a GIA deve enviar para o destinatario, escrita de forma natural como se fosse a assistente do gestor falando com a pessoa/grupo. SEMPRE inclua as opcoes de resposta (1-Concluida, 2-Em execucao, 3-Bloqueada) no final da mensagem, a menos que o gestor diga explicitamente para NAO pedir resposta."
 }
 
 REGRAS CRITICAS - DESTINO (PARA ONDE ENVIAR):
@@ -1163,26 +1173,28 @@ REGRAS CRITICAS - DESTINO (PARA ONDE ENVIAR):
 - Exemplo: "envia no grupo Financeiro o lembrete de pix para Ronaldo" -> assignee = "Financeiro" (destino), is_group = true (a mensagem FALA sobre Ronaldo mas o DESTINO e o grupo)
 - Exemplo: "envia pro Ronaldo pedindo o pix" -> assignee = "Ronaldo" (destino), is_group = false
 
-REGRAS CRITICAS - ENVIO vs PRAZO:
-- "send_now" define QUANDO a mensagem sera ENVIADA: true = enviar agora/imediatamente, false = agendar envio para o horario do due_date_iso
-- "due_date_iso" define o PRAZO FINAL da tarefa (quando a pessoa precisa ter terminado)
-- MUITO IMPORTANTE: O gestor pode querer ENVIAR AGORA mas com PRAZO FUTURO. Ex: "envia agora pedindo pro Diego comprar X, prazo amanha 14h" -> send_now=true, due_date_iso=amanha 14h
-- Se o gestor diz "envia agora", "manda agora", "envia ja" -> send_now=true
-- Se o gestor diz "envia segunda", "manda amanha as 8h" (sem mencionar "agora") -> send_now=false (agendar)
-- Se o gestor nao especifica quando enviar, assuma send_now=true (enviar imediatamente)
+REGRAS CRITICAS - HORARIO DE ENVIO vs PRAZO FINAL:
+- "scheduled_send_iso" = QUANDO a mensagem sera DISPARADA (horario do envio)
+- "due_date_iso" = PRAZO FINAL para a tarefa ser concluida (para cobranca)
+- ESSES DOIS CAMPOS SAO INDEPENDENTES. Podem ter valores diferentes!
+- Exemplo: "envia amanha 08:30, prazo final 15hrs" -> scheduled_send_iso=amanha 08:30, due_date_iso=amanha 15:00
+- Exemplo: "envia agora pedindo pro Diego, prazo amanha 14h" -> scheduled_send_iso=vazio (agora), due_date_iso=amanha 14:00
+- Exemplo: "envia segunda as 9h" (sem prazo) -> scheduled_send_iso=segunda 09:00, due_date_iso=vazio
+- Se o gestor diz "envia amanha as X" SEM mencionar prazo separado, entao scheduled_send_iso=amanha X e due_date_iso=vazio (pois nao mencionou prazo)
+- Se o gestor menciona APENAS "prazo amanha 15h" sem horario de envio -> scheduled_send_iso=vazio (enviar agora), due_date_iso=amanha 15:00
 - nudge=true significa que APOS o prazo (due_date_iso), a GIA vai cobrar resposta de 4 em 4 horas
 
 REGRAS GERAIS:
 - Se o gestor quer ENVIAR uma mensagem (perguntar algo, pedir algo, avisar), o proposed_message deve ser essa mensagem escrita de forma profissional e cordial
 - Se o gestor quer COBRAR algo, nudge=true e a instrucao deve refletir o tom (firme, educado, etc)
 - O proposed_message deve ser escrito na primeira pessoa como a GIA (Ex: "Ola! Aqui e a GIA, Executive Advisor do Sr. ${ownerName}. Ele gostaria de saber...")
+- SEMPRE inclua no final da proposed_message as opcoes: "Responda com:\\n1 - Concluida\\n2 - Em execucao\\n3 - Bloqueada" (a menos que o gestor explicitamente diga para nao pedir resposta/status)
 - Se nao ha destinatario claro, deixe assignee vazio
 - Se o gestor menciona dia da semana (ex: "na segunda-feira"), calcule a data ISO correta a partir de hoje ${todayISO}
-- Se o gestor menciona horario (ex: "08:30hr"), inclua no due_date_iso
+- Se o gestor menciona horario (ex: "08:30hr"), inclua no campo correto (scheduled_send_iso ou due_date_iso conforme contexto)
 - Se o gestor quer enviar para VARIOS contatos/pessoas, liste em "assignees"
 - Se e uma tarefa recorrente (ex: "toda segunda", "todo dia"), defina recurrence adequadamente
-- Se o gestor da instrucoes especificas de como enviar, coloque em instruction
-- NAO inclua o prazo na mensagem se o gestor nao pediu explicitamente para mencionar o prazo na mensagem`;
+- Se o gestor da instrucoes especificas de como enviar, coloque em instruction`;
 
           try {
             const parseRes = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -1192,7 +1204,7 @@ REGRAS GERAIS:
                 model: openaiModelNL,
                 temperature: 0.3,
                 messages: [
-                  { role: "system", content: "Voce extrai informacoes de comandos em linguagem natural. Responda SOMENTE com JSON valido." },
+                  { role: "system", content: `Voce extrai informacoes de comandos em linguagem natural. Responda SOMENTE com JSON valido.\n\n${sNL["ai_system_prompt"] ? "INSTRUCOES DE ESTILO PARA proposed_message (siga ao escrever a mensagem):\n" + sNL["ai_system_prompt"] : ""}` },
                   { role: "user", content: parsePrompt },
                 ],
               }),
@@ -1213,30 +1225,41 @@ REGRAS GERAIS:
               const instruction = String(parsed.instruction || "");
               const proposedMessage = String(parsed.proposed_message || "");
               const shouldNudge = parsed.nudge !== false && parsed.nudge !== "false";
-              const sendNowNL = parsed.send_now !== false && parsed.send_now !== "false";
               const recurrenceRaw = String(parsed.recurrence || "none").toLowerCase();
               const recurrence = /daily|diari/.test(recurrenceRaw) ? "daily" : /weekly|seman/.test(recurrenceRaw) ? "weekly" : /monthly|mens/.test(recurrenceRaw) ? "monthly" : /weekdays|[uú]te/.test(recurrenceRaw) ? "weekdays" : "none";
               const recurrenceInterval = Math.max(1, Number(parsed.recurrence_interval) || 1);
 
-              // Parse due_date from ISO output
+              // Parse scheduled_send_iso (when to SEND the message)
+              let scheduledSendNL: string | null = null;
+              const scheduledSendIso = String(parsed.scheduled_send_iso || "").trim();
+              if (scheduledSendIso) {
+                try {
+                  const d = new Date(scheduledSendIso);
+                  if (!isNaN(d.getTime())) {
+                    const utcMs = d.getTime() + 3 * 60 * 60 * 1000;
+                    scheduledSendNL = new Date(utcMs).toISOString();
+                  }
+                } catch { /* ignore bad dates */ }
+              }
+              const sendNowNL = !scheduledSendNL;
+
+              // Parse due_date from ISO output (DEADLINE for the task)
               let dueDateNL: string | null = null;
               const dueDateIso = String(parsed.due_date_iso || "").trim();
               if (dueDateIso) {
                 try {
                   const d = new Date(dueDateIso);
                   if (!isNaN(d.getTime())) {
-                    // Convert from BRT to UTC (add 3 hours)
                     const utcMs = d.getTime() + 3 * 60 * 60 * 1000;
                     dueDateNL = new Date(utcMs).toISOString();
                   }
                 } catch { /* ignore bad dates */ }
               }
 
-              // Calculate first_nudge_at based on due_date
+              // Calculate first_nudge_at based on due_date (nudge starts after deadline)
               let firstNudgeNL: string | null = dueDateNL;
               const defaultRepeatHoursNL = Number(sNL["default_repeat_hours"] || "4") || 4;
               if (!firstNudgeNL && shouldNudge) {
-                // If no due date but nudge active, set nudge for 1 hour after now
                 firstNudgeNL = new Date(Date.now() + 60 * 60 * 1000).toISOString();
               }
 
@@ -1282,7 +1305,7 @@ REGRAS GERAIS:
                   } else if (groupCandidates.length > 1) {
                     const confirmationNeeded = await askConfirmation(
                       supabase, sNL, remoteJid, assigneeRaw, groupCandidates,
-                      { title, description, priority, due_date: dueDateNL, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: firstNudgeNL, nudge_repeat_hours: shouldNudge ? defaultRepeatHoursNL : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true, send_now: sendNowNL }
+                      { title, description, priority, due_date: dueDateNL, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: firstNudgeNL, nudge_repeat_hours: shouldNudge ? defaultRepeatHoursNL : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true, send_now: sendNowNL, scheduled_send: scheduledSendNL }
                     );
                     if (confirmationNeeded) {
                       await logEvent("gia-nl-awaiting-confirmation", `group="${assigneeRaw}"`);
@@ -1297,7 +1320,7 @@ REGRAS GERAIS:
                     if (allCandidates.length > 0) {
                       const confirmationNeeded = await askConfirmation(
                         supabase, sNL, remoteJid, assigneeRaw, allCandidates,
-                        { title, description, priority, due_date: dueDateNL, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: firstNudgeNL, nudge_repeat_hours: shouldNudge ? defaultRepeatHoursNL : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true, send_now: sendNowNL }
+                        { title, description, priority, due_date: dueDateNL, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: firstNudgeNL, nudge_repeat_hours: shouldNudge ? defaultRepeatHoursNL : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true, send_now: sendNowNL, scheduled_send: scheduledSendNL }
                       );
                       if (confirmationNeeded) {
                         await logEvent("gia-nl-awaiting-confirmation", `group="${assigneeRaw}" whatsapp`);
@@ -1346,7 +1369,7 @@ REGRAS GERAIS:
                     }));
                     const confirmationNeeded = await askConfirmation(
                       supabase, sNL, remoteJid, assigneeRaw, candidates,
-                      { title, description, priority, due_date: dueDateNL, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: firstNudgeNL, nudge_repeat_hours: shouldNudge ? defaultRepeatHoursNL : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true, send_now: sendNowNL }
+                      { title, description, priority, due_date: dueDateNL, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: firstNudgeNL, nudge_repeat_hours: shouldNudge ? defaultRepeatHoursNL : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true, send_now: sendNowNL, scheduled_send: scheduledSendNL }
                     );
                     if (confirmationNeeded) {
                       await logEvent("gia-nl-awaiting-confirmation", `assignee="${assigneeRaw}"`);
@@ -1362,7 +1385,7 @@ REGRAS GERAIS:
                   if (whatsappCandidates.length > 0) {
                     const confirmationNeeded = await askConfirmation(
                       supabase, sNL, remoteJid, assigneeRaw, whatsappCandidates,
-                      { title, description, priority, due_date: dueDateNL, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: firstNudgeNL, nudge_repeat_hours: shouldNudge ? defaultRepeatHoursNL : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true, send_now: sendNowNL }
+                      { title, description, priority, due_date: dueDateNL, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: firstNudgeNL, nudge_repeat_hours: shouldNudge ? defaultRepeatHoursNL : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true, send_now: sendNowNL, scheduled_send: scheduledSendNL }
                     );
                     if (confirmationNeeded) {
                       await logEvent("gia-nl-awaiting-confirmation", `assignee="${assigneeRaw}" whatsapp`);
@@ -1403,6 +1426,7 @@ REGRAS GERAIS:
                   gia_instruction: instruction,
                   group_name: groupName,
                   send_now: sendNowNL,
+                  scheduled_send: scheduledSendNL,
                 };
 
                 await supabase.from("pending_message_approvals").insert({
@@ -1431,16 +1455,15 @@ REGRAS GERAIS:
                     const days = ["dom", "seg", "ter", "qua", "qui", "sex", "sab"];
                     return `${days[br.getUTCDay()]} ${dd}/${mm} ${hh}:${mi}`;
                   };
-                  const sendInfo = sendNowNL
-                    ? (dueDateNL ? `\nEnvio: AGORA\nPrazo da tarefa: ${fmtDateNL(dueDateNL)}` : `\nEnvio: AGORA`)
-                    : (dueDateNL ? `\nAgendado para: ${fmtDateNL(dueDateNL)}` : "");
+                  const sendTimeInfo = sendNowNL ? `\nEnvio: AGORA` : `\nEnvio agendado: ${fmtDateNL(scheduledSendNL)}`;
+                  const deadlineInfo = dueDateNL ? `\nPrazo final: ${fmtDateNL(dueDateNL)}` : "";
                   const nudgeInfo = shouldNudge && dueDateNL ? `\nCobranca apos prazo: a cada ${defaultRepeatHoursNL}h` : "";
                   const recurrenceInfo = recurrence !== "none" ? `\nRecorrencia: ${recurrence}${recurrenceInterval > 1 ? ` x${recurrenceInterval}` : ""}` : "";
                   const approvalMsg =
                     `Entendi! Vou enviar para *${assigneeName}*:\n\n` +
                     `---\n${proposedMessage}\n---\n\n` +
                     (shouldNudge ? `Cobranca ativa: vou acompanhar e cobrar respostas.\n` : `Sem cobranca: apenas envio sem cobrar resposta.\n`) +
-                    sendInfo + nudgeInfo + recurrenceInfo +
+                    sendTimeInfo + deadlineInfo + nudgeInfo + recurrenceInfo +
                     `\n\nPosso mandar? Responda *ok* para aprovar ou *nao* para cancelar.`;
                   await fetch(`${apiUrlNL}/message/sendText/${instanceNL}`, {
                     method: "POST",
