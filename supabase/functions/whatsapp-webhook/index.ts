@@ -477,7 +477,9 @@ Deno.serve(async (req: Request) => {
           // Approved - create the task and send (or schedule) the message
           const draft = approval.task_draft as Record<string, unknown>;
           const dueDate = draft.due_date ? String(draft.due_date) : null;
-          const isScheduledForLater = dueDate && new Date(dueDate).getTime() > Date.now() + 60000;
+          const draftSendNow = draft.send_now === true || draft.send_now === "true";
+          // Only schedule for later if due_date is future AND send_now is NOT true
+          const isScheduledForLater = dueDate && !draftSendNow && new Date(dueDate).getTime() > Date.now() + 60000;
 
           // If scheduled for the future, store the exact message in gia_instruction for send-task-nudge to use
           const giaInstructionForTask = isScheduledForLater
@@ -497,9 +499,9 @@ Deno.serve(async (req: Request) => {
               due_date: dueDate,
               recurrence: draft.recurrence ?? "none",
               recurrence_interval: draft.recurrence_interval ?? 1,
-              first_nudge_at: isScheduledForLater ? dueDate : (draft.first_nudge_at ?? null),
+              first_nudge_at: dueDate ?? (draft.first_nudge_at ?? null),
               nudge_repeat_hours: draft.nudge_repeat_hours ?? 0,
-              nudge_active: isScheduledForLater ? true : (draft.nudge_active ?? false),
+              nudge_active: dueDate ? true : (draft.nudge_active ?? false),
               gia_instruction: giaInstructionForTask,
             })
             .select()
@@ -1146,7 +1148,8 @@ Responda APENAS com JSON valido (sem markdown, sem crase), com estes campos:
   "assignee": "nome da pessoa destinataria (se mencionada, senao vazio)",
   "assignees": ["lista de nomes se houver MULTIPLOS destinatarios, senao array vazio"],
   "priority": "high/medium/low",
-  "due_date_iso": "data e hora de envio/prazo em formato ISO 8601 (ex: 2026-05-19T08:30:00). Calcule com base na data de HOJE. Se 'segunda-feira' e hoje e sexta, calcule a proxima segunda. Se nao ha prazo, vazio.",
+  "due_date_iso": "data e hora do PRAZO FINAL da tarefa em formato ISO 8601 (ex: 2026-05-19T08:30:00). Este e o prazo para a pessoa CONCLUIR a tarefa, NAO o horario de envio da mensagem. Calcule com base na data de HOJE. Se 'segunda-feira' e hoje e sexta, calcule a proxima segunda. Se nao ha prazo, vazio.",
+  "send_now": true,
   "recurrence": "none/daily/weekly/monthly/weekdays",
   "recurrence_interval": 1,
   "nudge": true,
@@ -1154,7 +1157,16 @@ Responda APENAS com JSON valido (sem markdown, sem crase), com estes campos:
   "proposed_message": "a mensagem EXATA que a GIA deve enviar para o destinatario, escrita de forma natural como se fosse a assistente do gestor falando com a pessoa"
 }
 
-REGRAS:
+REGRAS CRITICAS - ENVIO vs PRAZO:
+- "send_now" define QUANDO a mensagem sera ENVIADA: true = enviar agora/imediatamente, false = agendar envio para o horario do due_date_iso
+- "due_date_iso" define o PRAZO FINAL da tarefa (quando a pessoa precisa ter terminado)
+- MUITO IMPORTANTE: O gestor pode querer ENVIAR AGORA mas com PRAZO FUTURO. Ex: "envia agora pedindo pro Diego comprar X, prazo amanha 14h" -> send_now=true, due_date_iso=amanha 14h
+- Se o gestor diz "envia agora", "manda agora", "envia ja" -> send_now=true
+- Se o gestor diz "envia segunda", "manda amanha as 8h" (sem mencionar "agora") -> send_now=false (agendar)
+- Se o gestor nao especifica quando enviar, assuma send_now=true (enviar imediatamente)
+- nudge=true significa que APOS o prazo (due_date_iso), a GIA vai cobrar resposta de 4 em 4 horas
+
+REGRAS GERAIS:
 - Se o gestor quer ENVIAR uma mensagem (perguntar algo, pedir algo, avisar), o proposed_message deve ser essa mensagem escrita de forma profissional e cordial
 - Se o gestor quer COBRAR algo, nudge=true e a instrucao deve refletir o tom (firme, educado, etc)
 - O proposed_message deve ser escrito na primeira pessoa como a GIA (Ex: "Ola! Aqui e a GIA, Executive Advisor do Sr. ${ownerName}. Ele gostaria de saber...")
@@ -1163,8 +1175,8 @@ REGRAS:
 - Se o gestor menciona horario (ex: "08:30hr"), inclua no due_date_iso
 - Se o gestor quer enviar para VARIOS contatos/pessoas, liste em "assignees"
 - Se e uma tarefa recorrente (ex: "toda segunda", "todo dia"), defina recurrence adequadamente
-- nudge=true significa que a GIA vai cobrar resposta depois. nudge=false e so envio unico sem cobranca
-- Se o gestor da instrucoes especificas de como enviar, coloque em instruction`;
+- Se o gestor da instrucoes especificas de como enviar, coloque em instruction
+- NAO inclua o prazo na mensagem se o gestor nao pediu explicitamente para mencionar o prazo na mensagem`;
 
           try {
             const parseRes = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -1194,6 +1206,7 @@ REGRAS:
               const instruction = String(parsed.instruction || "");
               const proposedMessage = String(parsed.proposed_message || "");
               const shouldNudge = parsed.nudge !== false && parsed.nudge !== "false";
+              const sendNowNL = parsed.send_now !== false && parsed.send_now !== "false";
               const recurrenceRaw = String(parsed.recurrence || "none").toLowerCase();
               const recurrence = /daily|diari/.test(recurrenceRaw) ? "daily" : /weekly|seman/.test(recurrenceRaw) ? "weekly" : /monthly|mens/.test(recurrenceRaw) ? "monthly" : /weekdays|[uú]te/.test(recurrenceRaw) ? "weekdays" : "none";
               const recurrenceInterval = Math.max(1, Number(parsed.recurrence_interval) || 1);
@@ -1255,7 +1268,7 @@ REGRAS:
                     }));
                     const confirmationNeeded = await askConfirmation(
                       supabase, sNL, remoteJid, assigneeRaw, candidates,
-                      { title, description, priority, due_date: dueDateNL, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: firstNudgeNL, nudge_repeat_hours: shouldNudge ? defaultRepeatHoursNL : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true }
+                      { title, description, priority, due_date: dueDateNL, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: firstNudgeNL, nudge_repeat_hours: shouldNudge ? defaultRepeatHoursNL : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true, send_now: sendNowNL }
                     );
                     if (confirmationNeeded) {
                       await logEvent("gia-nl-awaiting-confirmation", `assignee="${assigneeRaw}"`);
@@ -1271,7 +1284,7 @@ REGRAS:
                   if (whatsappCandidates.length > 0) {
                     const confirmationNeeded = await askConfirmation(
                       supabase, sNL, remoteJid, assigneeRaw, whatsappCandidates,
-                      { title, description, priority, due_date: dueDateNL, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: firstNudgeNL, nudge_repeat_hours: shouldNudge ? defaultRepeatHoursNL : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true }
+                      { title, description, priority, due_date: dueDateNL, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: firstNudgeNL, nudge_repeat_hours: shouldNudge ? defaultRepeatHoursNL : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true, send_now: sendNowNL }
                     );
                     if (confirmationNeeded) {
                       await logEvent("gia-nl-awaiting-confirmation", `assignee="${assigneeRaw}" whatsapp`);
@@ -1311,6 +1324,7 @@ REGRAS:
                   nudge_active: shouldNudge,
                   gia_instruction: instruction,
                   group_name: groupName,
+                  send_now: sendNowNL,
                 };
 
                 await supabase.from("pending_message_approvals").insert({
@@ -1339,13 +1353,16 @@ REGRAS:
                     const days = ["dom", "seg", "ter", "qua", "qui", "sex", "sab"];
                     return `${days[br.getUTCDay()]} ${dd}/${mm} ${hh}:${mi}`;
                   };
-                  const scheduleInfo = dueDateNL ? `\nAgendado para: ${fmtDateNL(dueDateNL)}` : "";
+                  const sendInfo = sendNowNL
+                    ? (dueDateNL ? `\nEnvio: AGORA\nPrazo da tarefa: ${fmtDateNL(dueDateNL)}` : `\nEnvio: AGORA`)
+                    : (dueDateNL ? `\nAgendado para: ${fmtDateNL(dueDateNL)}` : "");
+                  const nudgeInfo = shouldNudge && dueDateNL ? `\nCobranca apos prazo: a cada ${defaultRepeatHoursNL}h` : "";
                   const recurrenceInfo = recurrence !== "none" ? `\nRecorrencia: ${recurrence}${recurrenceInterval > 1 ? ` x${recurrenceInterval}` : ""}` : "";
                   const approvalMsg =
                     `Entendi! Vou enviar para *${assigneeName}*:\n\n` +
                     `---\n${proposedMessage}\n---\n\n` +
                     (shouldNudge ? `Cobranca ativa: vou acompanhar e cobrar respostas.\n` : `Sem cobranca: apenas envio sem cobrar resposta.\n`) +
-                    scheduleInfo + recurrenceInfo +
+                    sendInfo + nudgeInfo + recurrenceInfo +
                     `\n\nPosso mandar? Responda *ok* para aprovar ou *nao* para cancelar.`;
                   await fetch(`${apiUrlNL}/message/sendText/${instanceNL}`, {
                     method: "POST",
@@ -1369,25 +1386,13 @@ REGRAS:
     }
 
     // Conversational fallback: owner sends a message that didn't match any specific handler
-    // ONLY process messages in the owner's self-chat (remoteJid = owner_phone)
-    if (fromMe && remoteJid && text) {
+    if (fromMe && remoteJid && text && eventName !== "send.message") {
       const { data: settingsChat } = await supabase.from("app_settings").select("key, value");
       const sChat: Record<string, string> = {};
       for (const row of settingsChat ?? []) sChat[row.key] = row.value;
       const ownerPhoneChat = sChat["owner_phone"] ?? "";
       const incomingChat = remoteJid.split("@")[0];
       const isOwnerChat = ownerPhoneChat && phonesMatch(ownerPhoneChat, incomingChat);
-
-      // Anti-loop: check if this message was sent by the GIA itself (via API) recently
-      // If the last GIA reply was less than 15 seconds ago, skip to avoid infinite loop
-      const lastReplyTs = sChat["_gia_last_chat_reply_ts"] ?? "0";
-      const msSinceLastReply = Date.now() - Number(lastReplyTs);
-      if (isOwnerChat && msSinceLastReply < 15000) {
-        await logEvent("ignored-gia-own-reply", `ms_since=${msSinceLastReply}`);
-        return new Response(JSON.stringify({ ignored: true, reason: "anti_loop" }), {
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
 
       if (isOwnerChat) {
         const openaiKeyChat = sChat["openai_api_key"] ?? "";
@@ -1566,163 +1571,6 @@ Se nao e uma acao especial, apenas responda normalmente como assistente.`;
                 });
                 // Anti-loop: record timestamp so the webhook ignores the echo
                 await supabase.from("app_settings").upsert({ key: "_gia_last_chat_reply_ts", value: String(Date.now()) }, { onConflict: "key" });
-              }
-            }
-
-            await logEvent("gia-chat-reply", text.slice(0, 60));
-            return new Response(
-              JSON.stringify({ chat_reply: true }),
-              { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-            );
-          } catch (e) {
-            await logEvent("gia-chat-error", e instanceof Error ? e.message : String(e));
-          }
-        }
-      }
-    }
-
-    // Conversational fallback: owner sends a message that didn't match any handler above
-    if (fromMe && remoteJid && text && eventName !== "send.message") {
-      const { data: settingsChat } = await supabase.from("app_settings").select("key, value");
-      const sChat: Record<string, string> = {};
-      for (const row of settingsChat ?? []) sChat[row.key] = row.value;
-      const ownerPhoneChat = sChat["owner_phone"] ?? "";
-      const incomingChat = remoteJid.split("@")[0];
-      const isOwnerChat = ownerPhoneChat && phonesMatch(ownerPhoneChat, incomingChat);
-
-      if (isOwnerChat) {
-        const openaiKeyChat = sChat["openai_api_key"] ?? "";
-        const openaiModelChat = sChat["openai_model"] || "gpt-4o-mini";
-        const apiUrlChat = sChat["evolution_api_url"]?.replace(/\/$/, "");
-        const apiKeyChat = sChat["evolution_api_key"];
-        const instanceChat = sChat["evolution_instance_name"];
-        const systemPromptChat = sChat["ai_system_prompt"] ?? "";
-        const rawOwnerChat = sChat["owner_name"] ?? "";
-        const ownerNameChat = (rawOwnerChat && rawOwnerChat.toLowerCase() !== "eu") ? rawOwnerChat : "Marco Abdo";
-
-        if (openaiKeyChat && apiUrlChat && apiKeyChat && instanceChat) {
-          const { data: recentTasks } = await supabase
-            .from("tasks")
-            .select("id, task_code, title, assignee_name, status, due_date, gia_instruction")
-            .order("created_at", { ascending: false })
-            .limit(20);
-
-          const { data: pendingApprovals } = await supabase
-            .from("pending_message_approvals")
-            .select("id, assignee_name, proposed_message, status, created_at")
-            .eq("status", "pending")
-            .order("created_at", { ascending: false })
-            .limit(5);
-
-          const nowBRChat = new Date(Date.now() - 3 * 60 * 60 * 1000);
-          const todayISOChat = nowBRChat.toISOString().slice(0, 10);
-          const dayNamesChat = ["domingo", "segunda-feira", "terca-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sabado"];
-          const todayDayNameChat = dayNamesChat[nowBRChat.getUTCDay()];
-
-          const tasksContext = (recentTasks ?? []).map(t =>
-            `- [${t.task_code ?? "?"}] "${t.title}" -> ${t.assignee_name} | status: ${t.status} | prazo: ${t.due_date ?? "sem"}`
-          ).join("\n");
-
-          const pendingContext = (pendingApprovals ?? []).length > 0
-            ? "\n\nAPROVACOES PENDENTES:\n" + pendingApprovals!.map(a => `- Para ${a.assignee_name}: "${(a.proposed_message ?? "").slice(0, 60)}..."`).join("\n")
-            : "";
-
-          const chatPrompt = `${systemPromptChat}\n\nVoce e a GIA, Executive Advisor do Sr. ${ownerNameChat}. O gestor (${ownerNameChat}) esta falando DIRETAMENTE com voce via WhatsApp. Responda de forma natural, inteligente e util.\n\nHOJE: ${todayISOChat} (${todayDayNameChat})\nHORA ATUAL (Brasilia): ${nowBRChat.toISOString().slice(11, 16)}\n\nTAREFAS RECENTES:\n${tasksContext || "(nenhuma tarefa)"}${pendingContext}\n\nCAPACIDADES:\n- Voce gerencia tarefas, agendamentos e cobrancas\n- Se o gestor pedir para alterar algo (ex: "ATOM-1017 altere o envio para AGORA"), confirme e execute\n- Se o gestor perguntar algo, responda com base no contexto das tarefas\n- Seja sempre concisa e direta\n- SIGA RIGOROSAMENTE as instrucoes do system prompt acima (emojis, tom, formato, etc)\n\nACAO ESPECIAL - ALTERAR AGENDAMENTO:\nSe o gestor pedir para alterar o horario de envio de uma tarefa (ex: "ATOM-1017 envie agora"):\n- Responda com JSON: {"action": "reschedule", "task_code": "ATOM-XXXX", "new_due_date": "ISO8601", "send_now": true/false}\n- Se "agora"/"imediatamente" -> send_now=true\n- APOS o JSON, adicione a mensagem de confirmacao separada por |||\n\nSe nao e uma acao especial, apenas responda normalmente como assistente.`;
-
-          try {
-            const aiResChat = await fetch("https://api.openai.com/v1/chat/completions", {
-              method: "POST",
-              headers: { "Content-Type": "application/json", Authorization: `Bearer ${openaiKeyChat}` },
-              body: JSON.stringify({
-                model: openaiModelChat,
-                temperature: 0.5,
-                messages: [
-                  { role: "system", content: chatPrompt },
-                  { role: "user", content: text },
-                ],
-              }),
-            });
-
-            if (aiResChat.ok) {
-              const jChat = await aiResChat.json();
-              let reply = String(jChat?.choices?.[0]?.message?.content ?? "").trim();
-
-              const jsonActionMatch = /^\s*\{[\s\S]*?"action"\s*:\s*"reschedule"[\s\S]*?\}/.exec(reply);
-              if (jsonActionMatch) {
-                try {
-                  const actionData = JSON.parse(jsonActionMatch[0]);
-                  const taskCode = actionData.task_code;
-                  const sendNow = actionData.send_now === true;
-
-                  const { data: targetTask } = await supabase
-                    .from("tasks")
-                    .select("*")
-                    .eq("task_code", taskCode)
-                    .maybeSingle();
-
-                  if (targetTask) {
-                    if (sendNow) {
-                      const exactMatch = /^ENVIAR_MENSAGEM_EXATA:\s*([\s\S]+)$/i.exec(targetTask.gia_instruction ?? "");
-                      if (exactMatch) {
-                        const msgToSend = exactMatch[1].trim();
-                        const isGroupSend = String(targetTask.assignee_phone).includes("@g.us");
-                        let numberSend = isGroupSend ? targetTask.assignee_phone : normalizePhone(String(targetTask.assignee_phone));
-                        if (!isGroupSend && numberSend.length <= 11) numberSend = "55" + numberSend;
-
-                        await fetch(`${apiUrlChat}/message/sendText/${instanceChat}`, {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json", apikey: apiKeyChat },
-                          body: JSON.stringify({ number: numberSend, text: msgToSend }),
-                        });
-
-                        await supabase.from("tasks").update({
-                          due_date: new Date().toISOString(),
-                          first_nudge_at: null,
-                          nudge_active: false,
-                          gia_instruction: "",
-                          last_ai_nudge: new Date().toISOString(),
-                          ai_interventions: (targetTask.ai_interventions ?? 0) + 1,
-                        }).eq("id", targetTask.id);
-
-                        reply = reply.includes("|||") ? reply.split("|||").pop()!.trim() : `Pronto! Mensagem enviada agora para *${targetTask.assignee_name}* (${taskCode}).`;
-                      } else {
-                        const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-                        const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-                        await fetch(`${supabaseUrl}/functions/v1/send-task-nudge`, {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json", Authorization: `Bearer ${serviceKey}` },
-                          body: JSON.stringify({ task_id: targetTask.id }),
-                        });
-
-                        await supabase.from("tasks").update({
-                          due_date: new Date().toISOString(),
-                          first_nudge_at: null,
-                          nudge_active: false,
-                        }).eq("id", targetTask.id);
-
-                        reply = reply.includes("|||") ? reply.split("|||").pop()!.trim() : `Pronto! Cobranca enviada agora para *${targetTask.assignee_name}* (${taskCode}).`;
-                      }
-                    } else {
-                      const newDue = actionData.new_due_date;
-                      await supabase.from("tasks").update({
-                        due_date: newDue,
-                        first_nudge_at: newDue,
-                      }).eq("id", targetTask.id);
-                      reply = reply.includes("|||") ? reply.split("|||").pop()!.trim() : `Reagendado ${taskCode} para ${newDue}.`;
-                    }
-                  } else {
-                    reply = reply.includes("|||") ? reply.split("|||").pop()!.trim() : `Nao encontrei a tarefa ${taskCode}. Verifique o codigo.`;
-                  }
-                } catch { /* JSON parse failed, send reply as-is */ }
-              }
-
-              if (reply) {
-                const numberReply = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
-                await fetch(`${apiUrlChat}/message/sendText/${instanceChat}`, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json", apikey: apiKeyChat },
-                  body: JSON.stringify({ number: numberReply, text: reply }),
-                });
               }
             }
 
