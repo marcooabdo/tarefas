@@ -1581,6 +1581,163 @@ Se nao e uma acao especial, apenas responda normalmente como assistente.`;
       }
     }
 
+    // Conversational fallback: owner sends a message that didn't match any handler above
+    if (fromMe && remoteJid && text && eventName !== "send.message") {
+      const { data: settingsChat } = await supabase.from("app_settings").select("key, value");
+      const sChat: Record<string, string> = {};
+      for (const row of settingsChat ?? []) sChat[row.key] = row.value;
+      const ownerPhoneChat = sChat["owner_phone"] ?? "";
+      const incomingChat = remoteJid.split("@")[0];
+      const isOwnerChat = ownerPhoneChat && phonesMatch(ownerPhoneChat, incomingChat);
+
+      if (isOwnerChat) {
+        const openaiKeyChat = sChat["openai_api_key"] ?? "";
+        const openaiModelChat = sChat["openai_model"] || "gpt-4o-mini";
+        const apiUrlChat = sChat["evolution_api_url"]?.replace(/\/$/, "");
+        const apiKeyChat = sChat["evolution_api_key"];
+        const instanceChat = sChat["evolution_instance_name"];
+        const systemPromptChat = sChat["ai_system_prompt"] ?? "";
+        const rawOwnerChat = sChat["owner_name"] ?? "";
+        const ownerNameChat = (rawOwnerChat && rawOwnerChat.toLowerCase() !== "eu") ? rawOwnerChat : "Marco Abdo";
+
+        if (openaiKeyChat && apiUrlChat && apiKeyChat && instanceChat) {
+          const { data: recentTasks } = await supabase
+            .from("tasks")
+            .select("id, task_code, title, assignee_name, status, due_date, gia_instruction")
+            .order("created_at", { ascending: false })
+            .limit(20);
+
+          const { data: pendingApprovals } = await supabase
+            .from("pending_message_approvals")
+            .select("id, assignee_name, proposed_message, status, created_at")
+            .eq("status", "pending")
+            .order("created_at", { ascending: false })
+            .limit(5);
+
+          const nowBRChat = new Date(Date.now() - 3 * 60 * 60 * 1000);
+          const todayISOChat = nowBRChat.toISOString().slice(0, 10);
+          const dayNamesChat = ["domingo", "segunda-feira", "terca-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sabado"];
+          const todayDayNameChat = dayNamesChat[nowBRChat.getUTCDay()];
+
+          const tasksContext = (recentTasks ?? []).map(t =>
+            `- [${t.task_code ?? "?"}] "${t.title}" -> ${t.assignee_name} | status: ${t.status} | prazo: ${t.due_date ?? "sem"}`
+          ).join("\n");
+
+          const pendingContext = (pendingApprovals ?? []).length > 0
+            ? "\n\nAPROVACOES PENDENTES:\n" + pendingApprovals!.map(a => `- Para ${a.assignee_name}: "${(a.proposed_message ?? "").slice(0, 60)}..."`).join("\n")
+            : "";
+
+          const chatPrompt = `${systemPromptChat}\n\nVoce e a GIA, Executive Advisor do Sr. ${ownerNameChat}. O gestor (${ownerNameChat}) esta falando DIRETAMENTE com voce via WhatsApp. Responda de forma natural, inteligente e util.\n\nHOJE: ${todayISOChat} (${todayDayNameChat})\nHORA ATUAL (Brasilia): ${nowBRChat.toISOString().slice(11, 16)}\n\nTAREFAS RECENTES:\n${tasksContext || "(nenhuma tarefa)"}${pendingContext}\n\nCAPACIDADES:\n- Voce gerencia tarefas, agendamentos e cobrancas\n- Se o gestor pedir para alterar algo (ex: "ATOM-1017 altere o envio para AGORA"), confirme e execute\n- Se o gestor perguntar algo, responda com base no contexto das tarefas\n- Seja sempre concisa e direta\n- SIGA RIGOROSAMENTE as instrucoes do system prompt acima (emojis, tom, formato, etc)\n\nACAO ESPECIAL - ALTERAR AGENDAMENTO:\nSe o gestor pedir para alterar o horario de envio de uma tarefa (ex: "ATOM-1017 envie agora"):\n- Responda com JSON: {"action": "reschedule", "task_code": "ATOM-XXXX", "new_due_date": "ISO8601", "send_now": true/false}\n- Se "agora"/"imediatamente" -> send_now=true\n- APOS o JSON, adicione a mensagem de confirmacao separada por |||\n\nSe nao e uma acao especial, apenas responda normalmente como assistente.`;
+
+          try {
+            const aiResChat = await fetch("https://api.openai.com/v1/chat/completions", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", Authorization: `Bearer ${openaiKeyChat}` },
+              body: JSON.stringify({
+                model: openaiModelChat,
+                temperature: 0.5,
+                messages: [
+                  { role: "system", content: chatPrompt },
+                  { role: "user", content: text },
+                ],
+              }),
+            });
+
+            if (aiResChat.ok) {
+              const jChat = await aiResChat.json();
+              let reply = String(jChat?.choices?.[0]?.message?.content ?? "").trim();
+
+              const jsonActionMatch = /^\s*\{[\s\S]*?"action"\s*:\s*"reschedule"[\s\S]*?\}/.exec(reply);
+              if (jsonActionMatch) {
+                try {
+                  const actionData = JSON.parse(jsonActionMatch[0]);
+                  const taskCode = actionData.task_code;
+                  const sendNow = actionData.send_now === true;
+
+                  const { data: targetTask } = await supabase
+                    .from("tasks")
+                    .select("*")
+                    .eq("task_code", taskCode)
+                    .maybeSingle();
+
+                  if (targetTask) {
+                    if (sendNow) {
+                      const exactMatch = /^ENVIAR_MENSAGEM_EXATA:\s*([\s\S]+)$/i.exec(targetTask.gia_instruction ?? "");
+                      if (exactMatch) {
+                        const msgToSend = exactMatch[1].trim();
+                        const isGroupSend = String(targetTask.assignee_phone).includes("@g.us");
+                        let numberSend = isGroupSend ? targetTask.assignee_phone : normalizePhone(String(targetTask.assignee_phone));
+                        if (!isGroupSend && numberSend.length <= 11) numberSend = "55" + numberSend;
+
+                        await fetch(`${apiUrlChat}/message/sendText/${instanceChat}`, {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json", apikey: apiKeyChat },
+                          body: JSON.stringify({ number: numberSend, text: msgToSend }),
+                        });
+
+                        await supabase.from("tasks").update({
+                          due_date: new Date().toISOString(),
+                          first_nudge_at: null,
+                          nudge_active: false,
+                          gia_instruction: "",
+                          last_ai_nudge: new Date().toISOString(),
+                          ai_interventions: (targetTask.ai_interventions ?? 0) + 1,
+                        }).eq("id", targetTask.id);
+
+                        reply = reply.includes("|||") ? reply.split("|||").pop()!.trim() : `Pronto! Mensagem enviada agora para *${targetTask.assignee_name}* (${taskCode}).`;
+                      } else {
+                        const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+                        const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+                        await fetch(`${supabaseUrl}/functions/v1/send-task-nudge`, {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json", Authorization: `Bearer ${serviceKey}` },
+                          body: JSON.stringify({ task_id: targetTask.id }),
+                        });
+
+                        await supabase.from("tasks").update({
+                          due_date: new Date().toISOString(),
+                          first_nudge_at: null,
+                          nudge_active: false,
+                        }).eq("id", targetTask.id);
+
+                        reply = reply.includes("|||") ? reply.split("|||").pop()!.trim() : `Pronto! Cobranca enviada agora para *${targetTask.assignee_name}* (${taskCode}).`;
+                      }
+                    } else {
+                      const newDue = actionData.new_due_date;
+                      await supabase.from("tasks").update({
+                        due_date: newDue,
+                        first_nudge_at: newDue,
+                      }).eq("id", targetTask.id);
+                      reply = reply.includes("|||") ? reply.split("|||").pop()!.trim() : `Reagendado ${taskCode} para ${newDue}.`;
+                    }
+                  } else {
+                    reply = reply.includes("|||") ? reply.split("|||").pop()!.trim() : `Nao encontrei a tarefa ${taskCode}. Verifique o codigo.`;
+                  }
+                } catch { /* JSON parse failed, send reply as-is */ }
+              }
+
+              if (reply) {
+                const numberReply = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
+                await fetch(`${apiUrlChat}/message/sendText/${instanceChat}`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json", apikey: apiKeyChat },
+                  body: JSON.stringify({ number: numberReply, text: reply }),
+                });
+              }
+            }
+
+            await logEvent("gia-chat-reply", text.slice(0, 60));
+            return new Response(
+              JSON.stringify({ chat_reply: true }),
+              { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
+          } catch (e) {
+            await logEvent("gia-chat-error", e instanceof Error ? e.message : String(e));
+          }
+        }
+      }
+    }
+
     if (fromMe || !remoteJid || (!text && !buttonId)) {
       await logEvent("ignored", `fromMe=${fromMe} jid=${!!remoteJid} text=${!!text} btn=${!!buttonId}`);
       return new Response(JSON.stringify({ ignored: true }), {
