@@ -1896,6 +1896,13 @@ Se o gestor pedir para mover/alterar o status de uma tarefa (ex: "move a ATOM-10
 - Mapeamento: "pendente" → "pending", "em andamento" → "in_progress", "aguardando resposta" / "IA cobrando" → "awaiting_response", "concluido"/"concluída" → "completed", "cancelado" → "cancelled"
 - APOS o JSON, adicione a mensagem de confirmacao separada por |||
 
+ACAO ESPECIAL - CRIAR TAREFA:
+Se o gestor pedir para criar uma tarefa, enviar mensagem, fazer cobranca, criar lembrete, ou qualquer acao que envolva criar algo novo (inclusive tarefas recorrentes para grupos):
+- Responda com JSON no formato: {"action": "create_task", "command": "COMANDO COMPLETO DO GESTOR COPIADO LITERALMENTE"}
+- O campo "command" deve conter o pedido EXATO do gestor para ser processado pelo sistema de criacao de tarefas
+- Isso inclui: criar tarefa, enviar mensagem para alguem, cobrar algo, lembrete, tarefa recorrente, etc
+- APOS o JSON, adicione a mensagem de confirmacao separada por |||
+
 Se nao e uma acao especial, apenas responda normalmente como assistente.`;
 
           try {
@@ -1915,6 +1922,42 @@ Se nao e uma acao especial, apenas responda normalmente como assistente.`;
             if (aiResChat.ok) {
               const jChat = await aiResChat.json();
               let reply = String(jChat?.choices?.[0]?.message?.content ?? "").trim();
+
+              // Check if the response contains a create_task action
+              const jsonCreateMatch = /\{[\s\S]*?"action"\s*:\s*"create_task"[\s\S]*?\}/.exec(reply);
+              if (jsonCreateMatch) {
+                try {
+                  const actionData = JSON.parse(jsonCreateMatch[0]);
+                  const command = String(actionData.command || "").trim();
+                  if (command) {
+                    // Re-invoke the webhook with "GIA <command>" to leverage the full NL pipeline
+                    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+                    const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+                    await fetch(`${supabaseUrl}/functions/v1/whatsapp-webhook`, {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json", Authorization: `Bearer ${serviceKey}` },
+                      body: JSON.stringify({
+                        event: "messages.upsert",
+                        data: {
+                          key: { fromMe: true, remoteJid },
+                          message: { conversation: `GIA ${command}` },
+                          messageType: "conversation",
+                        },
+                        instance: instanceChat,
+                      }),
+                    });
+                    reply = reply.includes("|||") ? reply.split("|||").pop()!.trim() : "";
+                    // Don't send a reply here - the NL pipeline will handle communication
+                    if (!reply) {
+                      await logEvent("gia-chat-create-task", command.slice(0, 60));
+                      return new Response(
+                        JSON.stringify({ chat_reply: true, delegated_to_nl: true }),
+                        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+                      );
+                    }
+                  }
+                } catch { /* JSON parse failed */ }
+              }
 
               // Check if the response contains an update_status action
               const jsonStatusMatch = /^\s*\{[\s\S]*?"action"\s*:\s*"update_status"[\s\S]*?\}/.exec(reply);
