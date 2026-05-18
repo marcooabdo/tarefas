@@ -130,6 +130,29 @@ async function searchWhatsAppChats(settings: Record<string, string>, query: stri
 
   const headers = { apikey: apiKey, "Content-Type": "application/json" };
   const queryLower = query.toLowerCase();
+  const queryWords = queryLower.split(/\s+/).filter(w => w.length >= 2);
+
+  const nameMatches = (name: string) => {
+    const nl = name.toLowerCase();
+    return nl.includes(queryLower) || queryWords.every(w => nl.includes(w));
+  };
+
+  // Try dedicated group fetch endpoints first (more complete for groups)
+  let groups: Array<{ id?: string; remoteJid?: string; subject?: string; name?: string }> = [];
+  const groupEndpoints = [
+    `${apiUrl}/group/fetchAllGroups/${instance}?getParticipants=false`,
+    `${apiUrl}/group/findGroups/${instance}`,
+  ];
+  for (const ep of groupEndpoints) {
+    try {
+      const r = await fetch(ep, { method: "GET", headers });
+      if (r.ok) {
+        const j = await r.json();
+        groups = Array.isArray(j) ? j : (j.groups ?? j.data ?? []);
+        if (groups.length) break;
+      }
+    } catch { /* try next */ }
+  }
 
   let chats: Array<{ remoteJid?: string; id?: string; pushName?: string; name?: string; subject?: string }> = [];
   const chatEndpoints = [
@@ -166,32 +189,38 @@ async function searchWhatsAppChats(settings: Record<string, string>, query: stri
   const candidates: Candidate[] = [];
   const seen = new Set<string>();
 
+  // Groups from dedicated endpoint
+  for (const g of groups) {
+    const jid = g.id ?? g.remoteJid ?? "";
+    if (!jid || seen.has(jid)) continue;
+    const name = g.subject ?? g.name ?? "";
+    if (!name || !nameMatches(name)) continue;
+    seen.add(jid);
+    candidates.push({ remote_jid: jid, name, phone: "", is_group: true });
+  }
+
   for (const c of chats) {
     const jid = c.remoteJid ?? c.id ?? "";
     if (!jid || seen.has(jid) || jid.endsWith("@broadcast")) continue;
     const isGroup = jid.endsWith("@g.us");
     const name = c.subject ?? c.name ?? c.pushName ?? "";
-    if (!name) continue;
-    if (name.toLowerCase().includes(queryLower)) {
-      seen.add(jid);
-      const phone = isGroup ? "" : jid.split("@")[0].replace(/\D/g, "");
-      candidates.push({ remote_jid: jid, name, phone: isGroup ? "" : `+${phone}`, is_group: isGroup });
-    }
+    if (!name || !nameMatches(name)) continue;
+    seen.add(jid);
+    const phone = isGroup ? "" : jid.split("@")[0].replace(/\D/g, "");
+    candidates.push({ remote_jid: jid, name, phone: isGroup ? "" : `+${phone}`, is_group: isGroup });
   }
 
   for (const c of contacts) {
     const jid = c.remoteJid ?? c.id ?? "";
     if (!jid || seen.has(jid) || jid.endsWith("@g.us") || jid.endsWith("@broadcast")) continue;
     const name = c.pushName ?? c.name ?? c.notify ?? "";
-    if (!name) continue;
-    if (name.toLowerCase().includes(queryLower)) {
-      seen.add(jid);
-      const phone = jid.split("@")[0].replace(/\D/g, "");
-      candidates.push({ remote_jid: jid, name, phone: `+${phone}`, is_group: false });
-    }
+    if (!name || !nameMatches(name)) continue;
+    seen.add(jid);
+    const phone = jid.split("@")[0].replace(/\D/g, "");
+    candidates.push({ remote_jid: jid, name, phone: `+${phone}`, is_group: false });
   }
 
-  return candidates.slice(0, 10);
+  return candidates.slice(0, 20);
 }
 
 async function askConfirmation(

@@ -47,6 +47,10 @@ Deno.serve(async (req: Request) => {
     const headers = { apikey: apiKey, "Content-Type": "application/json" };
 
     if (action === "list") {
+      const groupEndpoints = [
+        `${apiUrl}/group/fetchAllGroups/${instance}?getParticipants=false`,
+        `${apiUrl}/group/findGroups/${instance}`,
+      ];
       const chatEndpoints = [
         `${apiUrl}/chat/findChats/${instance}`,
         `${apiUrl}/chat/fetchChats/${instance}`,
@@ -55,6 +59,15 @@ Deno.serve(async (req: Request) => {
         `${apiUrl}/chat/findContacts/${instance}`,
         `${apiUrl}/chat/fetchContacts/${instance}`,
       ];
+
+      // Fetch all groups via dedicated endpoint (most complete)
+      let groupList: Array<{ id?: string; remoteJid?: string; subject?: string; name?: string }> = [];
+      for (const ep of groupEndpoints) {
+        try {
+          const r = await fetch(ep, { method: "GET", headers });
+          if (r.ok) { const j = await r.json(); groupList = Array.isArray(j) ? j : (j.groups ?? j.data ?? []); if (groupList.length) break; }
+        } catch { /* try next */ }
+      }
 
       let chats: EvoChat[] = [];
       for (const ep of chatEndpoints) {
@@ -74,6 +87,15 @@ Deno.serve(async (req: Request) => {
 
       const results: Array<{ remote_jid: string; name: string; phone: string; is_group: boolean }> = [];
       const seen = new Set<string>();
+
+      // Groups from dedicated endpoint first
+      for (const g of groupList) {
+        const jid = g.id ?? g.remoteJid ?? "";
+        if (!jid || seen.has(jid)) continue;
+        seen.add(jid);
+        const name = g.subject ?? g.name ?? "Grupo sem nome";
+        results.push({ remote_jid: jid, name, phone: "", is_group: true });
+      }
 
       for (const c of chats) {
         const jid = c.remoteJid ?? c.id ?? "";
