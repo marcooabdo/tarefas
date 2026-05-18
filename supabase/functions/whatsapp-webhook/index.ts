@@ -1653,6 +1653,63 @@ REGRAS GERAIS:
                 }
               } // end else if (assigneeRaw) contact search
 
+              // Self-reminder: no assignee means the owner wants a personal reminder
+              if (!assigneeRaw && (scheduledSendNL || dueDateNL)) {
+                const apiUrlSelf = sNL["evolution_api_url"]?.replace(/\/$/, "");
+                const apiKeySelf = sNL["evolution_api_key"];
+                const instanceSelf = sNL["evolution_instance_name"];
+
+                const { data: createdSelf } = await supabase.from("tasks").insert({
+                  title,
+                  description,
+                  assignee_name: ownerNameNL,
+                  assignee_phone: ownerPhoneNL,
+                  group_name: "",
+                  status: "pending",
+                  priority,
+                  due_date: dueDateNL ?? scheduledSendNL,
+                  first_nudge_at: null,
+                  nudge_active: false,
+                  recurrence,
+                  recurrence_interval: recurrenceInterval,
+                  gia_instruction: instruction || "lembrete pessoal",
+                  send_now: sendNowNL,
+                  scheduled_send: scheduledSendNL,
+                  is_nl_command: true,
+                }).select("task_code").maybeSingle();
+
+                if (apiUrlSelf && apiKeySelf && instanceSelf) {
+                  const numberSelf = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
+                  const fmtSelf = (iso: string | null) => {
+                    if (!iso) return "";
+                    const dt = new Date(iso);
+                    const br = new Date(dt.getTime() - 3 * 60 * 60 * 1000);
+                    const dd = String(br.getUTCDate()).padStart(2, "0");
+                    const mm = String(br.getUTCMonth() + 1).padStart(2, "0");
+                    const hh = String(br.getUTCHours()).padStart(2, "0");
+                    const mi = String(br.getUTCMinutes()).padStart(2, "0");
+                    const days = ["dom", "seg", "ter", "qua", "qui", "sex", "sab"];
+                    return `${days[br.getUTCDay()]} ${dd}/${mm} ${hh}:${mi}`;
+                  };
+                  const taskCode = createdSelf?.task_code ?? "";
+                  const confirmMsg = `Lembrete agendado: *${title}*\n` +
+                    (scheduledSendNL ? `Horario: ${fmtSelf(scheduledSendNL)}\n` : "") +
+                    (dueDateNL && dueDateNL !== scheduledSendNL ? `Prazo: ${fmtSelf(dueDateNL)}\n` : "") +
+                    (taskCode ? `Codigo: ${taskCode}` : "");
+                  await fetch(`${apiUrlSelf}/message/sendText/${instanceSelf}`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", apikey: apiKeySelf },
+                    body: JSON.stringify({ number: numberSelf, text: confirmMsg }),
+                  });
+                }
+
+                await logEvent("gia-nl-self-reminder", title);
+                return new Response(
+                  JSON.stringify({ self_reminder: true, title }),
+                  { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+                );
+              }
+
               // If we got here, assignee is resolved. Create approval request.
               if (proposedMessage && assigneeName !== (sNL["owner_name"] || "Eu")) {
                 const taskDraft = {
