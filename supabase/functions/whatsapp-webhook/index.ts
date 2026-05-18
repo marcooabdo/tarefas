@@ -10,13 +10,10 @@ const corsHeaders = {
 type Intent = "completed" | "in_progress" | "blocked" | "unknown";
 
 function classify(text: string): Intent {
-  const t = text.trim().toLowerCase();
-  if (/^1\b|\b1\s*[\-\.\)]/.test(t)) return "completed";
-  if (/^2\b|\b2\s*[\-\.\)]/.test(t)) return "in_progress";
-  if (/^3\b|\b3\s*[\-\.\)]/.test(t)) return "blocked";
-  if (/\b(sim|feito|pronto|conclu[ií]d|finaliz|entregu|done|completed|ok\s*feito)\b/.test(t)) return "completed";
-  if (/\b(fazendo|em andamento|trabalhando|tocando|come[cç]ando|iniciei|estou nisso)\b/.test(t)) return "in_progress";
-  if (/\b(bloqueado|travad|impedid|problema|atras|n[aã]o consigo|bloqueio)\b/.test(t)) return "blocked";
+  const t = text.trim();
+  if (/^\s*1\s*$/.test(t)) return "completed";
+  if (/^\s*2\s*$/.test(t)) return "in_progress";
+  if (/^\s*3\s*$/.test(t)) return "blocked";
   return "unknown";
 }
 
@@ -1723,9 +1720,28 @@ Se nao e uma acao especial, apenas responda normalmente como assistente.`;
       });
     }
 
-    // Intelligent response interpretation using gia_instruction when available
+    // Only process if: (1) message is exactly 1/2/3, (2) has task code, or (3) has gia_instruction and was nudged recently
     const giaInstr = String(match.gia_instruction ?? "").trim();
     let intent: Intent = classify(text);
+    const lastNudge = match.last_ai_nudge ? new Date(String(match.last_ai_nudge)).getTime() : 0;
+    const nudgedRecently = Date.now() - lastNudge < 48 * 60 * 60 * 1000; // 48h window
+
+    // If intent is unknown and no task code was explicitly referenced, ignore (don't interfere with casual chat)
+    if (intent === "unknown" && !code && !giaInstr) {
+      await logEvent("ignored-casual-chat", `from=${match.assignee_name} text="${text.slice(0, 40)}"`);
+      return new Response(JSON.stringify({ matched: false, reason: "casual_chat" }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    // If intent is unknown, no task code, has gia_instruction but wasn't nudged recently, also ignore
+    if (intent === "unknown" && !code && !nudgedRecently) {
+      await logEvent("ignored-no-recent-nudge", `from=${match.assignee_name}`);
+      return new Response(JSON.stringify({ matched: false, reason: "no_recent_nudge" }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
     const updates: Record<string, unknown> = {};
     const recurrence = String(match.recurrence ?? "none");
     const recurrenceInterval = Number(match.recurrence_interval ?? 1);
@@ -1733,7 +1749,7 @@ Se nao e uma acao especial, apenas responda normalmente como assistente.`;
     let aiInterpretation = "";
 
     // If gia_instruction exists and classify returns unknown, use GPT to interpret
-    if (giaInstr && intent === "unknown") {
+    if (giaInstr && intent === "unknown" && nudgedRecently) {
       const openaiKeyInt = settings["openai_api_key"] ?? "";
       const openaiModelInt = settings["openai_model"] || "gpt-4o-mini";
       if (openaiKeyInt) {
