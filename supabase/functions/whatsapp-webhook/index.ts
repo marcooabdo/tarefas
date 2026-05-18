@@ -1443,7 +1443,25 @@ REGRAS GERAIS:
               let assigneePhone = normalizePhone(ownerPhoneNL);
               let groupName = "";
 
-              if (assigneeRaw) {
+              // If the user typed a phone number directly in the command, skip contact search
+              const inlinePhoneMatch = freeText.match(/(?:^|\s)(?:\+?55\s?)?(\d[\d\s\-]{7,14}\d)(?:\s|$)/);
+              const inlinePhone = inlinePhoneMatch ? inlinePhoneMatch[1].replace(/[\s\-]/g, "") : null;
+              if (inlinePhone && assigneeRaw) {
+                const normalized = inlinePhone.length <= 11 ? "55" + inlinePhone : inlinePhone;
+                assigneeName = assigneeRaw;
+                assigneePhone = normalized;
+                // Try to enrich name from contacts if available
+                const { data: byPhone } = await supabase
+                  .from("contacts")
+                  .select("name, phone, remote_jid")
+                  .or(`phone.ilike.%${inlinePhone}%,remote_jid.ilike.%${inlinePhone}%`)
+                  .limit(1)
+                  .maybeSingle();
+                if (byPhone) {
+                  assigneeName = byPhone.name;
+                  assigneePhone = byPhone.remote_jid ? normalizePhone(String(byPhone.remote_jid).split("@")[0]) : normalizePhone(String(byPhone.phone ?? ""));
+                }
+              } else if (assigneeRaw) {
                 // Search in contacts - filter by is_group when GPT identified a group target
                 let contactQuery = supabase
                   .from("contacts")
@@ -1589,7 +1607,7 @@ REGRAS GERAIS:
                     );
                   }
                 }
-              }
+              } // end else if (assigneeRaw) contact search
 
               // If we got here, assignee is resolved. Create approval request.
               if (proposedMessage && assigneeName !== (sNL["owner_name"] || "Eu")) {
