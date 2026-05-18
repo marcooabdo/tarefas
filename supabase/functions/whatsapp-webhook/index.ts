@@ -1142,8 +1142,9 @@ Responda APENAS com JSON valido (sem markdown, sem crase), com estes campos:
 {
   "title": "titulo curto da tarefa/acao (max 80 chars)",
   "description": "descricao completa do que fazer",
-  "assignee": "nome da pessoa destinataria (se mencionada, senao vazio)",
+  "assignee": "nome da PESSOA ou GRUPO destinatario da mensagem (ONDE a mensagem sera enviada)",
   "assignees": ["lista de nomes se houver MULTIPLOS destinatarios, senao array vazio"],
+  "is_group": false,
   "priority": "high/medium/low",
   "due_date_iso": "data e hora do PRAZO FINAL da tarefa em formato ISO 8601 (ex: 2026-05-19T08:30:00). Este e o prazo para a pessoa CONCLUIR a tarefa, NAO o horario de envio da mensagem. Calcule com base na data de HOJE. Se 'segunda-feira' e hoje e sexta, calcule a proxima segunda. Se nao ha prazo, vazio.",
   "send_now": true,
@@ -1151,8 +1152,16 @@ Responda APENAS com JSON valido (sem markdown, sem crase), com estes campos:
   "recurrence_interval": 1,
   "nudge": true,
   "instruction": "instrucao de COMO a GIA deve agir - ex: 'seja firme', 'apenas envie sem pedir resposta', 'cobre normalmente'",
-  "proposed_message": "a mensagem EXATA que a GIA deve enviar para o destinatario, escrita de forma natural como se fosse a assistente do gestor falando com a pessoa"
+  "proposed_message": "a mensagem EXATA que a GIA deve enviar para o destinatario, escrita de forma natural como se fosse a assistente do gestor falando com a pessoa/grupo"
 }
+
+REGRAS CRITICAS - DESTINO (PARA ONDE ENVIAR):
+- O campo "assignee" e o DESTINO da mensagem: para ONDE a mensagem sera enviada
+- Se o gestor diz "envia NO GRUPO X" ou "manda no grupo X" -> assignee = nome do grupo, is_group = true
+- Se o gestor diz "envia pro fulano" ou "manda pra fulano" -> assignee = nome da pessoa, is_group = false
+- MUITO IMPORTANTE: Diferencie o DESTINO (onde enviar) do ASSUNTO (sobre quem/o que e a mensagem)
+- Exemplo: "envia no grupo Financeiro o lembrete de pix para Ronaldo" -> assignee = "Financeiro" (destino), is_group = true (a mensagem FALA sobre Ronaldo mas o DESTINO e o grupo)
+- Exemplo: "envia pro Ronaldo pedindo o pix" -> assignee = "Ronaldo" (destino), is_group = false
 
 REGRAS CRITICAS - ENVIO vs PRAZO:
 - "send_now" define QUANDO a mensagem sera ENVIADA: true = enviar agora/imediatamente, false = agendar envio para o horario do due_date_iso
@@ -1199,6 +1208,7 @@ REGRAS GERAIS:
               const description = String(parsed.description || "");
               const assigneeRaw = String(parsed.assignee || "").trim();
               const assigneesRaw: string[] = Array.isArray(parsed.assignees) ? parsed.assignees.filter((a: unknown) => typeof a === "string" && a.trim()) : [];
+              const targetIsGroup = parsed.is_group === true || parsed.is_group === "true";
               const priority = /alta|high|urgente/.test(String(parsed.priority || "")) ? "high" : /baixa|low/.test(String(parsed.priority || "")) ? "low" : "medium";
               const instruction = String(parsed.instruction || "");
               const proposedMessage = String(parsed.proposed_message || "");
@@ -1236,28 +1246,99 @@ REGRAS GERAIS:
               let groupName = "";
 
               if (assigneeRaw) {
-                // Search in contacts
-                const { data: byName } = await supabase
+                // Search in contacts - filter by is_group when GPT identified a group target
+                let contactQuery = supabase
                   .from("contacts")
                   .select("id, name, phone, country_code, is_group, remote_jid")
                   .eq("active", true)
-                  .ilike("name", `%${assigneeRaw}%`)
-                  .limit(5);
+                  .ilike("name", `%${assigneeRaw}%`);
+                if (targetIsGroup) contactQuery = contactQuery.eq("is_group", true);
+                const { data: byName } = await contactQuery.limit(10);
 
-                if (byName && byName.length === 1) {
-                  const c = byName[0];
+                // If targeting a group and found groups, filter to only groups
+                let filteredResults = byName ?? [];
+                if (targetIsGroup && filteredResults.length === 0) {
+                  // No groups found in contacts with that name, search WhatsApp directly for groups
+                  const whatsappCandidates = await searchWhatsAppChats(sNL, assigneeRaw);
+                  const groupCandidates = whatsappCandidates.filter(c => c.is_group);
+                  if (groupCandidates.length === 1) {
+                    const chosen = groupCandidates[0];
+                    assigneeName = chosen.name;
+                    assigneePhone = chosen.remote_jid;
+                    groupName = chosen.name;
+
+                    const { data: existing } = await supabase
+                      .from("contacts")
+                      .select("id")
+                      .eq("remote_jid", chosen.remote_jid)
+                      .maybeSingle();
+                    if (!existing) {
+                      await supabase.from("contacts").insert({
+                        name: chosen.name, phone: chosen.remote_jid,
+                        country_code: "+55", department: "Grupo",
+                        is_group: true, remote_jid: chosen.remote_jid, active: true,
+                      });
+                    }
+                  } else if (groupCandidates.length > 1) {
+                    const confirmationNeeded = await askConfirmation(
+                      supabase, sNL, remoteJid, assigneeRaw, groupCandidates,
+                      { title, description, priority, due_date: dueDateNL, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: firstNudgeNL, nudge_repeat_hours: shouldNudge ? defaultRepeatHoursNL : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true, send_now: sendNowNL }
+                    );
+                    if (confirmationNeeded) {
+                      await logEvent("gia-nl-awaiting-confirmation", `group="${assigneeRaw}"`);
+                      return new Response(
+                        JSON.stringify({ awaiting_confirmation: true, assignee: assigneeRaw }),
+                        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+                      );
+                    }
+                  } else {
+                    // No groups found at all, try full WhatsApp search
+                    const allCandidates = whatsappCandidates.length > 0 ? whatsappCandidates : await searchWhatsAppChats(sNL, assigneeRaw);
+                    if (allCandidates.length > 0) {
+                      const confirmationNeeded = await askConfirmation(
+                        supabase, sNL, remoteJid, assigneeRaw, allCandidates,
+                        { title, description, priority, due_date: dueDateNL, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: firstNudgeNL, nudge_repeat_hours: shouldNudge ? defaultRepeatHoursNL : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true, send_now: sendNowNL }
+                      );
+                      if (confirmationNeeded) {
+                        await logEvent("gia-nl-awaiting-confirmation", `group="${assigneeRaw}" whatsapp`);
+                        return new Response(
+                          JSON.stringify({ awaiting_confirmation: true, assignee: assigneeRaw }),
+                          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+                        );
+                      }
+                    } else {
+                      const apiUrlNotFound = sNL["evolution_api_url"]?.replace(/\/$/, "");
+                      const apiKeyNotFound = sNL["evolution_api_key"];
+                      const instanceNotFound = sNL["evolution_instance_name"];
+                      if (apiUrlNotFound && apiKeyNotFound && instanceNotFound) {
+                        const numberOwner = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
+                        await fetch(`${apiUrlNotFound}/message/sendText/${instanceNotFound}`, {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json", apikey: apiKeyNotFound },
+                          body: JSON.stringify({ number: numberOwner, text: `Nao encontrei o grupo "${assigneeRaw}" nos seus contatos nem no WhatsApp.` }),
+                        });
+                      }
+                      await logEvent("gia-nl-group-not-found", `group="${assigneeRaw}"`);
+                      return new Response(
+                        JSON.stringify({ error: "group_not_found", assignee: assigneeRaw }),
+                        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+                      );
+                    }
+                  }
+                } else if (filteredResults.length === 1) {
+                  const c = filteredResults[0];
                   assigneeName = c.name;
                   assigneePhone = c.remote_jid ? (c.is_group ? String(c.remote_jid) : normalizePhone(String(c.remote_jid).split("@")[0])) : normalizePhone(String(c.phone ?? ""));
                   if (c.is_group) groupName = c.name;
-                } else if (byName && byName.length > 1) {
-                  const exact = byName.find((c) => c.name.toLowerCase() === assigneeRaw.toLowerCase());
+                } else if (filteredResults.length > 1) {
+                  const exact = filteredResults.find((c) => c.name.toLowerCase() === assigneeRaw.toLowerCase());
                   if (exact) {
                     assigneeName = exact.name;
                     assigneePhone = exact.remote_jid ? (exact.is_group ? String(exact.remote_jid) : normalizePhone(String(exact.remote_jid).split("@")[0])) : normalizePhone(String(exact.phone ?? ""));
                     if (exact.is_group) groupName = exact.name;
                   } else {
                     // Multiple candidates - ask confirmation
-                    const candidates = byName.map((c) => ({
+                    const candidates = filteredResults.map((c) => ({
                       remote_jid: c.remote_jid ?? "",
                       name: c.name,
                       phone: c.phone ?? "",
