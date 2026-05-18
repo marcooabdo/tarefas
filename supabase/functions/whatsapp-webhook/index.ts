@@ -209,7 +209,7 @@ async function askConfirmation(
 
   await supabase.from("pending_task_confirmations").insert({
     owner_jid: ownerJid,
-    task_draft: taskDraft,
+    task_draft: { ...taskDraft, assignee_name_hint: searchTerm },
     candidates,
     status: "pending",
   });
@@ -221,7 +221,7 @@ async function askConfirmation(
     `Encontrei estes contatos/grupos para "${searchTerm}":\n\n` +
     lines.join("\n") +
     `\n\n0 - Nenhum desses (criar tarefa para mim mesmo)\n\n` +
-    `Responda com o número correspondente.`;
+    `Responda com o número correspondente ou envie o telefone diretamente (ex: 34 91234-5678).`;
 
   const number = ownerJid.endsWith("@g.us") ? ownerJid : normalizePhone(ownerJid.split("@")[0]);
   await fetch(`${apiUrl}/message/sendText/${instance}`, {
@@ -298,9 +298,12 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    // Handle pending confirmation responses (owner replying with a number)
+    // Handle pending confirmation responses (owner replying with a number or a phone)
+    // Also accept free-text replies that contain a phone number (e.g. "O telefone é 34 9123-4561")
     const confirmNum = /^\s*(\d+)\s*$/.exec(text);
-    if (confirmNum && remoteJid) {
+    const confirmPhoneMatch = !confirmNum ? text.match(/(?:^|[\s\-])(\d{2}[\s\-]?\d{4,5}[\s\-]?\d{4})(?:\s|$)/) : null;
+    const confirmPhone = confirmPhoneMatch ? confirmPhoneMatch[1].replace(/[\s\-]/g, "") : null;
+    if ((confirmNum || confirmPhone) && remoteJid) {
       const { data: pending } = await supabase
         .from("pending_task_confirmations")
         .select("*")
@@ -311,7 +314,7 @@ Deno.serve(async (req: Request) => {
 
       if (pending && pending.length > 0) {
         const confirmation = pending[0];
-        const choice = Number(confirmNum[1]);
+        const choice = confirmNum ? Number(confirmNum[1]) : -1;
         const candidates = confirmation.candidates as Candidate[];
         const draft = confirmation.task_draft as Record<string, unknown>;
 
@@ -323,7 +326,25 @@ Deno.serve(async (req: Request) => {
         let assigneePhone = normalizePhone(sConf["owner_phone"] ?? "");
         let groupName = "";
 
-        if (choice >= 1 && choice <= candidates.length) {
+        if (confirmPhone) {
+          // User replied with a phone number directly — use it
+          const normalized = confirmPhone.length <= 11 ? "55" + confirmPhone : confirmPhone;
+          assigneePhone = normalized;
+          // Try to find name from the draft's assignee field or contacts
+          const draftAssignee = String((draft as Record<string, unknown>).assignee_name_hint ?? "");
+          assigneeName = draftAssignee || candidates[0]?.name || "Contato";
+          // Try to enrich name from contacts
+          const { data: byPhoneConf } = await supabase
+            .from("contacts")
+            .select("name, phone, remote_jid")
+            .or(`phone.ilike.%${confirmPhone}%,remote_jid.ilike.%${confirmPhone}%`)
+            .limit(1)
+            .maybeSingle();
+          if (byPhoneConf) {
+            assigneeName = byPhoneConf.name;
+            assigneePhone = byPhoneConf.remote_jid ? normalizePhone(String(byPhoneConf.remote_jid).split("@")[0]) : normalizePhone(String(byPhoneConf.phone ?? ""));
+          }
+        } else if (choice >= 1 && choice <= candidates.length) {
           const chosen = candidates[choice - 1];
           assigneeName = chosen.name;
           assigneePhone = chosen.is_group ? chosen.remote_jid : normalizePhone(chosen.remote_jid.split("@")[0]);
@@ -1444,8 +1465,9 @@ REGRAS GERAIS:
               let groupName = "";
 
               // If the user typed a phone number directly in the command, skip contact search
-              const inlinePhoneMatch = freeText.match(/(?:^|\s)(?:\+?55\s?)?(\d[\d\s\-]{7,14}\d)(?:\s|$)/);
-              const inlinePhone = inlinePhoneMatch ? inlinePhoneMatch[1].replace(/[\s\-]/g, "") : null;
+              // Matches formats like: 34 9123-4561, 349123-4561, +55 34 91234-5678, (34)91234-5678
+              const inlinePhoneMatch = freeText.match(/(?:^|[\s(])(?:\+?55[\s\-]?)?(\(?\d{2}\)?[\s\-]?\d{4,5}[\s\-]?\d{4})(?=[\s,.]|$)/);
+              const inlinePhone = inlinePhoneMatch ? inlinePhoneMatch[1].replace(/[\s\-().]/g, "") : null;
               if (inlinePhone && assigneeRaw) {
                 const normalized = inlinePhone.length <= 11 ? "55" + inlinePhone : inlinePhone;
                 assigneeName = assigneeRaw;
