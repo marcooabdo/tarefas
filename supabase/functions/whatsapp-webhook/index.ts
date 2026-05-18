@@ -479,9 +479,10 @@ Deno.serve(async (req: Request) => {
           const draft = approval.task_draft as Record<string, unknown>;
           const dueDate = draft.due_date ? String(draft.due_date) : null;
           const scheduledSend = draft.scheduled_send ? String(draft.scheduled_send) : null;
-          const draftSendNow = draft.send_now === true || draft.send_now === "true";
           // Schedule for later if there's a scheduled_send time in the future
           const isScheduledForLater = scheduledSend && new Date(scheduledSend).getTime() > Date.now() + 60000;
+          // True when there is a real deadline separate from the send time
+          const hasDeadlineSeparateFromSend = isScheduledForLater && dueDate && dueDate !== scheduledSend;
 
           // If scheduled for the future, store the exact message in gia_instruction for send-task-nudge to use
           // Format: ENVIAR_MENSAGEM_EXATA:[PRAZO:iso|NUDGE_HOURS:n|INSTRUCTION:text] message
@@ -509,9 +510,6 @@ Deno.serve(async (req: Request) => {
             })
             .select()
             .maybeSingle();
-
-          // After task created, if there's a separate deadline, store it for post-send update
-          const hasDeadlineSeparateFromSend = isScheduledForLater && dueDate && dueDate !== scheduledSend;
 
           if (isScheduledForLater) {
             // DON'T send now - it's scheduled for later
@@ -1465,15 +1463,17 @@ REGRAS GERAIS:
                     const days = ["dom", "seg", "ter", "qua", "qui", "sex", "sab"];
                     return `${days[br.getUTCDay()]} ${dd}/${mm} ${hh}:${mi}`;
                   };
-                  const sendTimeInfo = sendNowNL ? `\nEnvio: AGORA` : `\nEnvio agendado: ${fmtDateNL(scheduledSendNL)}`;
-                  const deadlineInfo = dueDateNL ? `\nPrazo final: ${fmtDateNL(dueDateNL)}` : "";
-                  const nudgeInfo = shouldNudge && dueDateNL ? `\nCobranca apos prazo: a cada ${defaultRepeatHoursNL}h` : "";
-                  const recurrenceInfo = recurrence !== "none" ? `\nRecorrencia: ${recurrence}${recurrenceInterval > 1 ? ` x${recurrenceInterval}` : ""}` : "";
+                  const lines: string[] = [];
+                  if (!sendNowNL && scheduledSendNL) lines.push(`Envio agendado: ${fmtDateNL(scheduledSendNL)}`);
+                  else lines.push(`Envio: AGORA`);
+                  if (dueDateNL) lines.push(`Prazo final: ${fmtDateNL(dueDateNL)}`);
+                  if (shouldNudge && dueDateNL) lines.push(`Cobranca apos prazo: a cada ${defaultRepeatHoursNL}h`);
+                  if (recurrence !== "none") lines.push(`Recorrencia: ${recurrence}${recurrenceInterval > 1 ? ` x${recurrenceInterval}` : ""}`);
+                  const infoBlock = lines.map(l => `// ${l}`).join("\n");
                   const approvalMsg =
-                    `Entendi! Vou enviar para *${assigneeName}*:\n\n` +
-                    `---\n${proposedMessage}\n---\n\n` +
-                    (shouldNudge ? `Cobranca ativa: vou acompanhar e cobrar respostas.\n` : `Sem cobranca: apenas envio sem cobrar resposta.\n`) +
-                    sendTimeInfo + deadlineInfo + nudgeInfo + recurrenceInfo +
+                    `Contato confirmado: *${assigneeName}*\n\n` +
+                    `Vou enviar:\n---\n${proposedMessage}\n---\n\n` +
+                    infoBlock +
                     `\n\nPosso mandar? Responda *ok* para aprovar ou *nao* para cancelar.`;
                   await fetch(`${apiUrlNL}/message/sendText/${instanceNL}`, {
                     method: "POST",
