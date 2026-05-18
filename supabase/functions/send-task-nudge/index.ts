@@ -80,7 +80,7 @@ Deno.serve(async (req: Request) => {
       const realDeadline = exactMsgMatch[1] || null;
       const realNudgeHours = Number(exactMsgMatch[2]) || 4;
       const realInstruction = exactMsgMatch[3] || "";
-      const exactMessage = exactMsgMatch[4].trim();
+      const exactMessage = exactMsgMatch[4].trim().replace(/ATOM-XXXX/g, task.task_code ?? "");
       const isGroup = String(task.assignee_phone).includes("@g.us");
       let number = isGroup ? task.assignee_phone : String(task.assignee_phone).replace(/\D/g, "");
       if (!isGroup && number.length <= 11) number = "55" + number;
@@ -134,15 +134,16 @@ Deno.serve(async (req: Request) => {
         `Olá ${task.assignee_name}! Aqui é a GIA, assistente do Sr. Marco Abdo.\n\n` +
         `${task.title}${descriptionText ? "\n" + task.description : ""}`;
     } else {
+      const taskRef = task.task_code ?? "ATOM-XXXX";
       fallbackMessage =
         `Olá ${task.assignee_name}! Aqui é a GIA, Executive Advisor do Sr. Marco Abdo.\n\n` +
         `Preciso de uma atualização sobre: *"${task.title}"*${descriptionText}\n` +
         `Prazo: ${dueLabel}.\n\n` +
-        `Responda apenas com o número correspondente:\n` +
-        `1 - Concluída\n` +
-        `2 - Em execução\n` +
-        `3 - Bloqueada\n\n` +
-        `Ref: ${task.task_code ?? "—"}`;
+        `Para responder, envie o código da tarefa + status:\n` +
+        `*${taskRef} concluído* - se já finalizou\n` +
+        `*${taskRef} em andamento* - se está fazendo\n` +
+        `*${taskRef} bloqueado* - se algo impede\n\n` +
+        `Ref: ${taskRef}`;
     }
 
     let message = fallbackMessage;
@@ -169,7 +170,7 @@ Deno.serve(async (req: Request) => {
             `Tarefa: ${task.title}\n` +
             `Descrição completa: ${task.description || "Nenhuma descrição adicional"}\n` +
             `Prazo: ${dueLabel}\n` +
-            `Referência: ${task.task_code ?? "—"}\n` +
+            `Código da tarefa: ${task.task_code ?? "—"}\n` +
             (giaInstruction ? `\nInstrução adicional do gestor: ${giaInstruction}\n` : "") +
             `\nINSTRUÇÕES OBRIGATÓRIAS:\n` +
             `- SIGA RIGOROSAMENTE todas as instruções do system prompt (emojis, tom, formato, apresentação)\n` +
@@ -177,8 +178,8 @@ Deno.serve(async (req: Request) => {
             `- Contextualize o que precisa ser feito de forma objetiva para que a pessoa entenda exatamente do que se trata.\n` +
             `- Informe o prazo REAL da tarefa (${dueLabel}). NÃO invente prazos.\n` +
             `- Se o prazo é futuro, a data exata é: ${task.due_date ? new Date(new Date(task.due_date).getTime() - 3*60*60*1000).toISOString().slice(0,10) : "sem prazo"}\n` +
-            `- A mensagem DEVE incluir explicitamente as opções de resposta:\n` +
-            `1 - Concluída\n2 - Em execução\n3 - Bloqueada\n\n` +
+            `- A mensagem DEVE incluir no final as instruções de resposta neste formato EXATO:\n` +
+            `"Para responder, envie:\n${task.task_code ?? "ATOM-XXXX"} concluído - se já finalizou\n${task.task_code ?? "ATOM-XXXX"} em andamento - se está fazendo\n${task.task_code ?? "ATOM-XXXX"} bloqueado - se algo impede"\n\n` +
             `Termine com "Ref: ${task.task_code ?? "—"}". Não inclua nada além da mensagem final.`;
         }
         const aiRes = await fetch("https://api.openai.com/v1/chat/completions", {

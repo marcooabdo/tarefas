@@ -10,10 +10,13 @@ const corsHeaders = {
 type Intent = "completed" | "in_progress" | "blocked" | "unknown";
 
 function classify(text: string): Intent {
-  const t = text.trim();
-  if (/^\s*1\s*$/.test(t)) return "completed";
-  if (/^\s*2\s*$/.test(t)) return "in_progress";
-  if (/^\s*3\s*$/.test(t)) return "blocked";
+  const t = text.trim().toLowerCase();
+  // Match: ATOM-XXXX + status keyword
+  if (/atom-\d{3,6}\s+.*/i.test(t)) {
+    if (/\b(conclu[ií]d[oa]?|finalizado|feito|pronto|done|terminado)\b/.test(t)) return "completed";
+    if (/\b(andamento|fazendo|executando|trabalhando|em\s+execu[cç][aã]o)\b/.test(t)) return "in_progress";
+    if (/\b(bloquead[oa]?|travad[oa]?|impedid[oa]?|problema)\b/.test(t)) return "blocked";
+  }
   return "unknown";
 }
 
@@ -87,17 +90,18 @@ function phonesMatch(a: string, b: string): boolean {
   return false;
 }
 
-function replyFor(intent: Intent, name: string, title: string): string {
+function replyFor(intent: Intent, name: string, title: string, taskCode?: string): string {
   const firstName = (name ?? "").split(" ")[0] || "tudo bem";
+  const code = taskCode ?? "";
   switch (intent) {
     case "completed":
       return `Perfeito, ${firstName}! Registrei "${title}" como concluída. Obrigado pela atualização.`;
     case "in_progress":
-      return `Valeu, ${firstName}! Marquei "${title}" como em execução. Me avisa quando concluir ou se travar em algo.`;
+      return `Valeu, ${firstName}! Marquei "${title}" como em execução. Me avisa quando concluir.`;
     case "blocked":
       return `Entendido, ${firstName}. Anotei um bloqueio em "${title}". Pode me contar rapidamente o que está impedindo para eu escalar se necessário?`;
     default:
-      return `Recebi sua mensagem sobre "${title}", ${firstName}. Pode confirmar se está: 1) concluída, 2) em andamento, ou 3) bloqueada?`;
+      return `Recebi sua mensagem, ${firstName}. Para atualizar o status, responda com o código da tarefa + status.\n\nExemplo: *${code || "ATOM-XXXX"} concluído*\n\nOpções: concluído, em andamento, bloqueado.`;
   }
 }
 
@@ -551,19 +555,25 @@ Deno.serve(async (req: Request) => {
 
           // Send the proposed message NOW to the contact
           if (apiUrlAppr && apiKeyAppr && instanceAppr && approval.proposed_message) {
+            const realCode = createdTask?.task_code ?? "";
+            // Replace ATOM-XXXX placeholder with real task code
+            let finalMessage = String(approval.proposed_message);
+            if (realCode) {
+              finalMessage = finalMessage.replace(/ATOM-XXXX/g, realCode);
+            }
             const isGroupAppr = String(approval.assignee_phone).includes("@g.us");
             let numberDest = isGroupAppr ? approval.assignee_phone : normalizePhone(approval.assignee_phone);
             if (!isGroupAppr && numberDest.length <= 11) numberDest = "55" + numberDest;
             await fetch(`${apiUrlAppr}/message/sendText/${instanceAppr}`, {
               method: "POST",
               headers: { "Content-Type": "application/json", apikey: apiKeyAppr },
-              body: JSON.stringify({ number: numberDest, text: approval.proposed_message }),
+              body: JSON.stringify({ number: numberDest, text: finalMessage }),
             });
             await supabase.from("send_logs").insert({
               contact_name: approval.assignee_name,
               contact_phone: approval.assignee_phone,
               template_name: "Mensagem aprovada (GIA NL)",
-              message_content: approval.proposed_message,
+              message_content: finalMessage,
               status: "sent",
               sent_at: new Date().toISOString(),
             });
@@ -1162,7 +1172,7 @@ Responda APENAS com JSON valido (sem markdown, sem crase), com estes campos:
   "recurrence_interval": 1,
   "nudge": true,
   "instruction": "instrucao de COMO a GIA deve agir - ex: 'seja firme', 'apenas envie sem pedir resposta', 'cobre normalmente'",
-  "proposed_message": "a mensagem EXATA que a GIA deve enviar para o destinatario, escrita de forma natural como se fosse a assistente do gestor falando com a pessoa/grupo. SEMPRE inclua as opcoes de resposta (1-Concluida, 2-Em execucao, 3-Bloqueada) no final da mensagem, a menos que o gestor diga explicitamente para NAO pedir resposta."
+  "proposed_message": "a mensagem EXATA que a GIA deve enviar para o destinatario, escrita de forma natural como se fosse a assistente do gestor falando com a pessoa/grupo. SEMPRE inclua no final da mensagem as instrucoes de resposta usando o codigo da tarefa (que sera gerado automaticamente como ATOM-XXXX). Formato: 'Para responder, envie: ATOM-XXXX concluido / em andamento / bloqueado'. A menos que o gestor diga explicitamente para NAO pedir resposta."
 }
 
 REGRAS CRITICAS - DESTINO (PARA ONDE ENVIAR):
@@ -1188,7 +1198,7 @@ REGRAS GERAIS:
 - Se o gestor quer ENVIAR uma mensagem (perguntar algo, pedir algo, avisar), o proposed_message deve ser essa mensagem escrita de forma profissional e cordial
 - Se o gestor quer COBRAR algo, nudge=true e a instrucao deve refletir o tom (firme, educado, etc)
 - O proposed_message deve ser escrito na primeira pessoa como a GIA (Ex: "Ola! Aqui e a GIA, Executive Advisor do Sr. ${ownerName}. Ele gostaria de saber...")
-- SEMPRE inclua no final da proposed_message as opcoes: "Responda com:\\n1 - Concluida\\n2 - Em execucao\\n3 - Bloqueada" (a menos que o gestor explicitamente diga para nao pedir resposta/status)
+- SEMPRE inclua no final da proposed_message as instrucoes de resposta: "Para responder, envie:\\nATOM-XXXX concluido - se ja finalizou\\nATOM-XXXX em andamento - se esta fazendo\\nATOM-XXXX bloqueado - se algo impede" (substitua ATOM-XXXX pelo codigo real se disponivel, senao use ATOM-XXXX como placeholder que sera substituido apos criacao). A menos que o gestor explicitamente diga para nao pedir resposta/status
 - Se nao ha destinatario claro, deixe assignee vazio
 - Se o gestor menciona dia da semana (ex: "na segunda-feira"), calcule a data ISO correta a partir de hoje ${todayISO}
 - Se o gestor menciona horario (ex: "08:30hr"), inclua no campo correto (scheduled_send_iso ou due_date_iso conforme contexto)
@@ -1966,7 +1976,7 @@ Se nao e uma acao especial, apenas responda normalmente como assistente.`;
       const openaiModel = settings["openai_model"] || "gpt-4o-mini";
       const systemPrompt = settings["ai_system_prompt"] ?? "";
       if (apiUrl && apiKey && instanceName) {
-        let replyText = replyFor(intent, String(match.assignee_name ?? ""), String(match.title ?? ""));
+        let replyText = replyFor(intent, String(match.assignee_name ?? ""), String(match.title ?? ""), String(match.task_code ?? ""));
 
         // If GPT already produced a reply from interpretation, use it
         if (aiInterpretation) {
