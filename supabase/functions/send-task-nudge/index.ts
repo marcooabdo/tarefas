@@ -146,6 +146,7 @@ Deno.serve(async (req: Request) => {
     if (openaiKey) {
       try {
         let userBrief: string;
+        const ownerNameNudge = settings["owner_name"] && settings["owner_name"].toLowerCase() !== "eu" ? settings["owner_name"] : "Marco Abdo";
         if (isSendOnly) {
           userBrief =
             `Gere uma mensagem para envio no WhatsApp seguindo estas instruções do meu chefe:\n\n` +
@@ -154,10 +155,10 @@ Deno.serve(async (req: Request) => {
             `Título/Assunto: ${task.title}\n` +
             `Descrição/Contexto: ${task.description || "Nenhuma descrição adicional"}\n\n` +
             `REGRAS:\n` +
+            `- OBRIGATÓRIO: A mensagem DEVE começar com uma apresentação da GIA. Ex: "Olá [nome]! Aqui é a GIA, assistente do Sr. ${ownerNameNudge}."\n` +
             `- Siga EXATAMENTE a instrução acima. Não peça status, não peça resposta numerada (1, 2, 3).\n` +
             `- Seja cordial e natural como uma assistente executiva.\n` +
-            `- Não mencione "tarefa", "prazo", "cobrança" ou "pendência".\n` +
-            `- Apenas envie a mensagem conforme solicitado, como se fosse uma assistente real do Marco.\n` +
+            `- Use emojis de forma moderada.\n` +
             `- Não inclua referência de tarefa. Seja breve e humana.`;
         } else {
           userBrief =
@@ -169,11 +170,13 @@ Deno.serve(async (req: Request) => {
             `Código da tarefa: ${task.task_code ?? "—"}\n` +
             (giaInstruction ? `\nInstrução adicional do gestor: ${giaInstruction}\n` : "") +
             `\nINSTRUÇÕES OBRIGATÓRIAS:\n` +
+            `- OBRIGATÓRIO: A mensagem DEVE começar com uma apresentação. Ex: "Olá [nome]! Aqui é a GIA, Executive Advisor do Sr. ${ownerNameNudge}."\n` +
             `- SIGA RIGOROSAMENTE todas as instruções do system prompt (emojis, tom, formato, apresentação)\n` +
             `- Explique claramente para a pessoa O QUE é a tarefa usando o título e a descrição fornecidos.\n` +
             `- Contextualize o que precisa ser feito de forma objetiva para que a pessoa entenda exatamente do que se trata.\n` +
             `- Informe o prazo REAL da tarefa (${dueLabel}). NÃO invente prazos.\n` +
             `- Se o prazo é futuro, a data exata é: ${task.due_date ? new Date(new Date(task.due_date).getTime() - 3*60*60*1000).toISOString().slice(0,10) : "sem prazo"}\n` +
+            `- Use emojis de forma natural e moderada.\n` +
             `- A mensagem DEVE incluir no final EXATAMENTE esta instrução de conclusão:\n` +
             `"Ao concluir, responda: ${task.task_code ?? ""} concluído"\n\n` +
             `Não inclua nada além da mensagem final.`;

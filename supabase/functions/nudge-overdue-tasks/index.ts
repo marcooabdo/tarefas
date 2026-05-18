@@ -127,6 +127,7 @@ Deno.serve(async (req: Request) => {
       if (openaiKey) {
         try {
           const giaInstructionNote = giaInstr ? `\nInstrução adicional do gestor: ${giaInstr}\n` : "";
+          const ownerNameNudge = settings["owner_name"] && settings["owner_name"].toLowerCase() !== "eu" ? settings["owner_name"] : "Marco Abdo";
           const userBrief =
             `Gere a mensagem de cobrança proativa da seguinte tarefa para envio no WhatsApp.\n` +
             `Responsável: ${task.assignee_name}\n` +
@@ -136,13 +137,14 @@ Deno.serve(async (req: Request) => {
             `Referência: ${task.task_code ?? "—"}\n` +
             giaInstructionNote +
             `\nINSTRUÇÕES OBRIGATÓRIAS:\n` +
+            `- OBRIGATÓRIO: A mensagem DEVE começar com uma apresentação da GIA. Ex: "Olá ${firstName}! Aqui é a GIA, Executive Advisor do Sr. ${ownerNameNudge}."\n` +
             `- SIGA RIGOROSAMENTE todas as instruções do system prompt (emojis, tom, formato, apresentação)\n` +
             `- Explique claramente para a pessoa O QUE é a tarefa usando o título e a descrição fornecidos.\n` +
             `- Contextualize o que precisa ser feito de forma objetiva para que a pessoa entenda exatamente do que se trata.\n` +
             `- Informe o prazo REAL da tarefa (${dueLabel}). NÃO invente prazos.\n` +
             `- Se o prazo é futuro (ex: "vence em 2 dias"), diga a data exata: ${task.due_date ? new Date(new Date(task.due_date).getTime() - 3*60*60*1000).toISOString().slice(0,10) : "sem prazo"}\n` +
-            `- A mensagem DEVE terminar com: "Ao concluir, responda: *${task.task_code ?? ""} concluido*"\n` +
             `- Use emojis de forma natural e moderada.\n` +
+            `- A mensagem DEVE terminar com: "Ao concluir, responda: *${task.task_code ?? ""} concluido*"\n` +
             `Nao inclua nada alem da mensagem final.`;
           const aiRes = await fetch("https://api.openai.com/v1/chat/completions", {
             method: "POST",

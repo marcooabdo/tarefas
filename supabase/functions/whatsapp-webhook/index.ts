@@ -1268,7 +1268,7 @@ REGRAS:
                   headers: { "Content-Type": "application/json", Authorization: `Bearer ${openaiKeyNL}` },
                   body: JSON.stringify({ model: openaiModelNL, temperature: 0.5, messages: [
                     { role: "system", content: `Voce e a GIA, assistente executiva do Sr. ${ownerName}. Escreva mensagens de recobranca humanizadas e diretas. Use emojis moderadamente.${sNL["ai_system_prompt"] ? "\n" + sNL["ai_system_prompt"] : ""}` },
-                    { role: "user", content: `Gere mensagem de re-cobranca para:\nResponsavel: ${task.assignee_name}\nTarefa: ${task.title}\nDescricao: ${task.description || "sem descricao"}\nPrazo original: ${fmtDueRN(task.due_date)}\n\nA mensagem DEVE terminar com: "Ao concluir, responda: ${taskCode} concluido"\nUse emojis moderadamente. Nao inclua nada alem da mensagem final.` },
+                    { role: "user", content: `Gere mensagem de re-cobranca para:\nResponsavel: ${task.assignee_name}\nTarefa: ${task.title}\nDescricao: ${task.description || "sem descricao"}\nPrazo original: ${fmtDueRN(task.due_date)}\n\nINSTRUCOES OBRIGATORIAS:\n- OBRIGATORIO: A mensagem DEVE comecar com apresentacao da GIA. Ex: "Ola ${(task.assignee_name ?? "").split(" ")[0]}! Aqui e a GIA, assistente do Sr. ${ownerName}."\n- Use emojis moderadamente.\n- A mensagem DEVE terminar com: "Ao concluir, responda: ${taskCode} concluido"\nNao inclua nada alem da mensagem final.` },
                   ]}),
                 });
                 if (rmRes.ok) {
@@ -1351,7 +1351,7 @@ REGRAS CRITICAS - HORARIO DE ENVIO vs PRAZO FINAL:
 REGRAS GERAIS:
 - Se o gestor quer ENVIAR uma mensagem (perguntar algo, pedir algo, avisar), o proposed_message deve ser essa mensagem escrita de forma profissional e cordial
 - Se o gestor quer COBRAR algo, nudge=true e a instrucao deve refletir o tom (firme, educado, etc)
-- O proposed_message deve ser escrito na primeira pessoa como a GIA (Ex: "Ola! Aqui e a GIA, Executive Advisor do Sr. ${ownerName}...")
+- O proposed_message DEVE SEMPRE comecar com apresentacao da GIA. Ex: "Ola [nome]! Aqui e a GIA, Executive Advisor do Sr. ${ownerName}." — isso e OBRIGATORIO para a pessoa saber que nao e o proprio gestor escrevendo
 - Use emojis de forma natural e moderada no proposed_message
 - SEMPRE inclua no final da proposed_message: "Ao concluir, responda: ATOM-XXXX concluido" (sera substituido pelo codigo real). A menos que o gestor diga para nao pedir resposta${needsConfirmation ? "\n- REGRA ABSOLUTA: O gestor usou 'confirmacao', a linha 'Ao concluir, responda: ATOM-XXXX concluido' e OBRIGATORIA" : ""}
 - Se nao ha destinatario claro, deixe assignee vazio
