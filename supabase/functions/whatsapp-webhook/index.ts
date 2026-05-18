@@ -343,6 +343,17 @@ Deno.serve(async (req: Request) => {
           if (byPhoneConf) {
             assigneeName = byPhoneConf.name;
             assigneePhone = byPhoneConf.remote_jid ? normalizePhone(String(byPhoneConf.remote_jid).split("@")[0]) : normalizePhone(String(byPhoneConf.phone ?? ""));
+          } else {
+            // Save new contact from phone typed by user
+            await supabase.from("contacts").insert({
+              name: assigneeName,
+              phone: normalized,
+              country_code: "+55",
+              department: "",
+              is_group: false,
+              remote_jid: `${normalized}@s.whatsapp.net`,
+              active: true,
+            });
           }
         } else if (choice >= 1 && choice <= candidates.length) {
           const chosen = candidates[choice - 1];
