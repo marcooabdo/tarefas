@@ -1803,6 +1803,13 @@ Se o gestor pedir para alterar o horario de envio de uma tarefa (ex: "ATOM-1017 
 - Se "agora"/"imediatamente" → send_now=true
 - APOS o JSON, adicione a mensagem de confirmacao separada por |||
 
+ACAO ESPECIAL - ALTERAR STATUS:
+Se o gestor pedir para mover/alterar o status de uma tarefa (ex: "move a ATOM-1028 para Aguardando Resposta", "muda o status da ATOM-X para concluido"):
+- Responda com JSON no formato: {"action": "update_status", "task_code": "ATOM-XXXX", "new_status": "STATUS"}
+- Valores validos para new_status: "pending", "in_progress", "awaiting_response", "completed", "cancelled"
+- Mapeamento: "pendente" → "pending", "em andamento" → "in_progress", "aguardando resposta" / "IA cobrando" → "awaiting_response", "concluido"/"concluída" → "completed", "cancelado" → "cancelled"
+- APOS o JSON, adicione a mensagem de confirmacao separada por |||
+
 Se nao e uma acao especial, apenas responda normalmente como assistente.`;
 
           try {
@@ -1822,6 +1829,30 @@ Se nao e uma acao especial, apenas responda normalmente como assistente.`;
             if (aiResChat.ok) {
               const jChat = await aiResChat.json();
               let reply = String(jChat?.choices?.[0]?.message?.content ?? "").trim();
+
+              // Check if the response contains an update_status action
+              const jsonStatusMatch = /^\s*\{[\s\S]*?"action"\s*:\s*"update_status"[\s\S]*?\}/.exec(reply);
+              if (jsonStatusMatch) {
+                try {
+                  const actionData = JSON.parse(jsonStatusMatch[0]);
+                  const taskCode = actionData.task_code;
+                  const newStatus = actionData.new_status;
+                  const validStatuses = ["pending", "in_progress", "awaiting_response", "completed", "cancelled"];
+                  if (taskCode && validStatuses.includes(newStatus)) {
+                    const { data: targetTask } = await supabase
+                      .from("tasks")
+                      .select("id, assignee_name")
+                      .eq("task_code", taskCode)
+                      .maybeSingle();
+                    if (targetTask) {
+                      await supabase.from("tasks").update({ status: newStatus }).eq("id", targetTask.id);
+                      reply = reply.includes("|||") ? reply.split("|||").pop()!.trim() : `Pronto! Status da ${taskCode} atualizado para "${newStatus}".`;
+                    } else {
+                      reply = reply.includes("|||") ? reply.split("|||").pop()!.trim() : `Nao encontrei a tarefa ${taskCode}.`;
+                    }
+                  }
+                } catch { /* JSON parse failed */ }
+              }
 
               // Check if the response contains a reschedule action
               const jsonActionMatch = /^\s*\{[\s\S]*?"action"\s*:\s*"reschedule"[\s\S]*?\}/.exec(reply);
