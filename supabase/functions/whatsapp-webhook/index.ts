@@ -90,14 +90,24 @@ function phonesMatch(a: string, b: string): boolean {
   return false;
 }
 
-function replyFor(intent: Intent, name: string, title: string, taskCode?: string): string {
+function replyFor(intent: Intent, name: string, title: string, taskCode?: string, newDueIso?: string): string {
   const firstName = (name ?? "").split(" ")[0] || "tudo bem";
   const code = taskCode ?? "";
   switch (intent) {
     case "completed":
-      return `Perfeito, ${firstName}! Registrei "${title}" como concluída. Obrigado pela atualização.`;
-    case "in_progress":
-      return `Valeu, ${firstName}! Marquei "${title}" como em execução. Me avisa quando concluir.`;
+      return `Perfeito, ${firstName}! Registrei "${title}" como concluída. Obrigado pela atualização! ✅`;
+    case "in_progress": {
+      let duePart = "";
+      if (newDueIso) {
+        const d = new Date(new Date(newDueIso).getTime() - 3 * 60 * 60 * 1000);
+        const dd = String(d.getUTCDate()).padStart(2, "0");
+        const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+        const hh = String(d.getUTCHours()).padStart(2, "0");
+        const mi = String(d.getUTCMinutes()).padStart(2, "0");
+        duePart = ` O novo prazo ficará para *${dd}/${mm} às ${hh}:${mi}*. Contamos com você! 💪`;
+      }
+      return `Obrigada pelo retorno, ${firstName}! 😊 Entendido que "${title}" ainda está em andamento.${duePart}\n\nQuando finalizar, responda: *${code} concluido*`;
+    }
     case "blocked":
       return `Entendido, ${firstName}. Anotei um bloqueio em "${title}". Pode me contar rapidamente o que está impedindo para eu escalar se necessário?`;
     default:
@@ -2107,6 +2117,11 @@ Se nao e uma acao especial, apenas responda normalmente como assistente.`;
       }
     } else if (intent === "in_progress") {
       updates.status = "in_progress";
+      const newDue = new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString();
+      updates.due_date = newDue;
+      updates.first_nudge_at = newDue;
+      updates.nudge_active = true;
+      updates.last_ai_nudge = null;
     } else if (intent === "blocked") {
       updates.status = "pending";
     }
@@ -2133,10 +2148,10 @@ Se nao e uma acao especial, apenas responda normalmente como assistente.`;
       const openaiModel = settings["openai_model"] || "gpt-4o-mini";
       const systemPrompt = settings["ai_system_prompt"] ?? "";
       if (apiUrl && apiKey && instanceName) {
-        let replyText = replyFor(intent, String(match.assignee_name ?? ""), String(match.title ?? ""), String(match.task_code ?? ""));
+        let replyText = replyFor(intent, String(match.assignee_name ?? ""), String(match.title ?? ""), String(match.task_code ?? ""), intent === "in_progress" ? (updates.due_date as string | undefined) : undefined);
 
-        // If GPT already produced a reply from interpretation, use it
-        if (aiInterpretation) {
+        // If GPT already produced a reply from interpretation, use it (but not for in_progress — we need the deadline info)
+        if (aiInterpretation && intent !== "in_progress") {
           try {
             const aiParsed = JSON.parse(aiInterpretation);
             if (aiParsed.reply_to_contact) replyText = aiParsed.reply_to_contact;
