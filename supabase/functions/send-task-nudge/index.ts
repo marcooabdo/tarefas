@@ -134,16 +134,12 @@ Deno.serve(async (req: Request) => {
         `Olá ${task.assignee_name}! Aqui é a GIA, assistente do Sr. Marco Abdo.\n\n` +
         `${task.title}${descriptionText ? "\n" + task.description : ""}`;
     } else {
-      const taskRef = task.task_code ?? "ATOM-XXXX";
+      const taskRef = task.task_code ?? "";
       fallbackMessage =
         `Olá ${task.assignee_name}! Aqui é a GIA, Executive Advisor do Sr. Marco Abdo.\n\n` +
         `Preciso de uma atualização sobre: *"${task.title}"*${descriptionText}\n` +
         `Prazo: ${dueLabel}.\n\n` +
-        `Para responder, envie o código da tarefa + status:\n` +
-        `*${taskRef} concluído* - se já finalizou\n` +
-        `*${taskRef} em andamento* - se está fazendo\n` +
-        `*${taskRef} bloqueado* - se algo impede\n\n` +
-        `Ref: ${taskRef}`;
+        `Ao concluir, responda: *${taskRef} concluído*`;
     }
 
     let message = fallbackMessage;
@@ -178,9 +174,9 @@ Deno.serve(async (req: Request) => {
             `- Contextualize o que precisa ser feito de forma objetiva para que a pessoa entenda exatamente do que se trata.\n` +
             `- Informe o prazo REAL da tarefa (${dueLabel}). NÃO invente prazos.\n` +
             `- Se o prazo é futuro, a data exata é: ${task.due_date ? new Date(new Date(task.due_date).getTime() - 3*60*60*1000).toISOString().slice(0,10) : "sem prazo"}\n` +
-            `- A mensagem DEVE incluir no final as instruções de resposta neste formato EXATO:\n` +
-            `"Para responder, envie:\n${task.task_code ?? "ATOM-XXXX"} concluído - se já finalizou\n${task.task_code ?? "ATOM-XXXX"} em andamento - se está fazendo\n${task.task_code ?? "ATOM-XXXX"} bloqueado - se algo impede"\n\n` +
-            `Termine com "Ref: ${task.task_code ?? "—"}". Não inclua nada além da mensagem final.`;
+            `- A mensagem DEVE incluir no final EXATAMENTE esta instrução de conclusão:\n` +
+            `"Ao concluir, responda: ${task.task_code ?? ""} concluído"\n\n` +
+            `Não inclua nada além da mensagem final.`;
         }
         const aiRes = await fetch("https://api.openai.com/v1/chat/completions", {
           method: "POST",
