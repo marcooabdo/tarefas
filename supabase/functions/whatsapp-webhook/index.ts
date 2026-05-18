@@ -207,6 +207,12 @@ async function askConfirmation(
   const instance = settings["evolution_instance_name"];
   if (!apiUrl || !apiKey || !instance || candidates.length === 0) return false;
 
+  // Cancel any previous pending confirmations for this owner before creating a new one
+  await supabase.from("pending_task_confirmations")
+    .update({ status: "expired", resolved_at: new Date().toISOString() })
+    .eq("owner_jid", ownerJid)
+    .eq("status", "pending");
+
   await supabase.from("pending_task_confirmations").insert({
     owner_jid: ownerJid,
     task_draft: { ...taskDraft, assignee_name_hint: searchTerm },
@@ -392,6 +398,11 @@ Deno.serve(async (req: Request) => {
         // If this is a NL command with proposed_message, go to approval flow
         if (draft.is_nl_command && draft.proposed_message && assigneeName !== (sConf["owner_name"] || "Eu")) {
           const taskDraftForApproval = { ...draft, group_name: groupName };
+          // Cancel stale pending approvals before creating a new one
+          await supabase.from("pending_message_approvals")
+            .update({ status: "expired", resolved_at: new Date().toISOString() })
+            .eq("owner_jid", remoteJid)
+            .eq("status", "pending");
           await supabase.from("pending_message_approvals").insert({
             owner_jid: remoteJid,
             task_draft: taskDraftForApproval,
@@ -1654,6 +1665,12 @@ REGRAS GERAIS:
                   send_now: sendNowNL,
                   scheduled_send: scheduledSendNL,
                 };
+
+                // Cancel stale pending approvals before creating a new one
+                await supabase.from("pending_message_approvals")
+                  .update({ status: "expired", resolved_at: new Date().toISOString() })
+                  .eq("owner_jid", remoteJid)
+                  .eq("status", "pending");
 
                 await supabase.from("pending_message_approvals").insert({
                   owner_jid: remoteJid,
