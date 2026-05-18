@@ -119,14 +119,10 @@ Deno.serve(async (req: Request) => {
       const firstName = (task.assignee_name ?? "").split(" ")[0] || "time";
       const descriptionText = task.description ? `\nDetalhes: ${task.description}` : "";
       const fallbackMessage =
-        `Olá ${firstName}! Aqui é a GIA, Executive Advisor do Sr. Marco Abdo.\n\n` +
-        `Preciso de uma atualização sobre: *"${task.title}"*${descriptionText}\n` +
+        `Oi ${firstName}! Aqui e a GIA, Executive Advisor do Sr. Marco Abdo.\n\n` +
+        `Preciso de uma atualizacao sobre: *"${task.title}"*${descriptionText}\n` +
         `Prazo: ${dueLabel}.\n\n` +
-        `Responda apenas com o número:\n` +
-        `1 - Concluída\n` +
-        `2 - Em execução\n` +
-        `3 - Bloqueada\n\n` +
-        `Ref: ${task.task_code ?? "—"}`;
+        `Ao concluir, responda: *${task.task_code ?? ""} concluido*`;
       let message = fallbackMessage;
       if (openaiKey) {
         try {
@@ -145,9 +141,9 @@ Deno.serve(async (req: Request) => {
             `- Contextualize o que precisa ser feito de forma objetiva para que a pessoa entenda exatamente do que se trata.\n` +
             `- Informe o prazo REAL da tarefa (${dueLabel}). NÃO invente prazos.\n` +
             `- Se o prazo é futuro (ex: "vence em 2 dias"), diga a data exata: ${task.due_date ? new Date(new Date(task.due_date).getTime() - 3*60*60*1000).toISOString().slice(0,10) : "sem prazo"}\n` +
-            `- A mensagem DEVE incluir explicitamente as opções de resposta:\n` +
-            `1 - Concluída\n2 - Em execução\n3 - Bloqueada\n\n` +
-            `Termine com "Ref: ${task.task_code ?? "—"}". Não inclua nada além da mensagem final.`;
+            `- A mensagem DEVE terminar com: "Ao concluir, responda: *${task.task_code ?? ""} concluido*"\n` +
+            `- Use emojis de forma natural e moderada.\n` +
+            `Nao inclua nada alem da mensagem final.`;
           const aiRes = await fetch("https://api.openai.com/v1/chat/completions", {
             method: "POST",
             headers: { "Content-Type": "application/json", Authorization: `Bearer ${openaiKey}` },

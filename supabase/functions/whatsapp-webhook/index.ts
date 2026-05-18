@@ -475,8 +475,52 @@ Deno.serve(async (req: Request) => {
             );
           }
 
-          // Approved - create the task and send (or schedule) the message
+          // Approved - handle re-nudge (existing task) or create new task
           const draft = approval.task_draft as Record<string, unknown>;
+
+          // RE-NUDGE: just send the message, no new task
+          if (draft.is_renudge === true) {
+            if (apiUrlAppr && apiKeyAppr && instanceAppr && approval.proposed_message) {
+              const isGroupRN = String(approval.assignee_phone).includes("@g.us");
+              let numberDestRN = isGroupRN ? approval.assignee_phone : normalizePhone(approval.assignee_phone);
+              if (!isGroupRN && numberDestRN.length <= 11) numberDestRN = "55" + numberDestRN;
+              await fetch(`${apiUrlAppr}/message/sendText/${instanceAppr}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json", apikey: apiKeyAppr },
+                body: JSON.stringify({ number: numberDestRN, text: approval.proposed_message }),
+              });
+              await supabase.from("send_logs").insert({
+                contact_name: approval.assignee_name,
+                contact_phone: approval.assignee_phone,
+                template_name: "Re-cobranca (GIA)",
+                message_content: approval.proposed_message,
+                status: "sent",
+                sent_at: new Date().toISOString(),
+              });
+            }
+            // Update existing task nudge counter
+            const existingTaskId = draft.existing_task_id ? String(draft.existing_task_id) : null;
+            if (existingTaskId) {
+              const { data: existingTask } = await supabase.from("tasks").select("ai_interventions").eq("id", existingTaskId).maybeSingle();
+              await supabase.from("tasks").update({
+                ai_interventions: ((existingTask?.ai_interventions as number) ?? 0) + 1,
+                last_ai_nudge: new Date().toISOString(),
+                status: "awaiting_response",
+              }).eq("id", existingTaskId);
+            }
+            await supabase.from("pending_message_approvals").update({ status: "approved", resolved_at: new Date().toISOString(), task_id: existingTaskId }).eq("id", approval.id);
+            if (apiUrlAppr && apiKeyAppr && instanceAppr) {
+              const numberAppr = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
+              await fetch(`${apiUrlAppr}/message/sendText/${instanceAppr}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json", apikey: apiKeyAppr },
+                body: JSON.stringify({ number: numberAppr, text: `Cobranca enviada para *${approval.assignee_name}*. Estou acompanhando.` }),
+              });
+            }
+            await logEvent("renudge-sent", `task=${existingTaskId} assignee="${approval.assignee_name}"`);
+            return new Response(JSON.stringify({ renudge_sent: true, task_id: existingTaskId }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+          }
+
           const dueDate = draft.due_date ? String(draft.due_date) : null;
           const scheduledSend = draft.scheduled_send ? String(draft.scheduled_send) : null;
           // Schedule for later if there's a scheduled_send time in the future
@@ -1149,11 +1193,123 @@ REGRAS:
           const rawOwnerName = sNL["owner_name"] ?? "";
           const ownerName = (rawOwnerName && rawOwnerName.toLowerCase() !== "eu") ? rawOwnerName : "Marco Abdo";
 
+          // ── RE-NUDGE FLOW ─────────────────────────────────────────────────────
+          const isRenudgeCmd = /\b(cobra\s*(novamente|de\s*novo|outra\s*vez|mais\s*uma\s*vez)|cobr[ae]\s*de\s*novo|manda\s*(outra\s*)?(cobran[cç]a|lembrete)\s*(de\s*novo|novamente|outra\s*vez)?|reenvia\s*(cobran[cç]a|lembrete)|cobra\s+novamente)\b/i.test(freeText);
+          if (isRenudgeCmd) {
+            const renudgeParsePrompt = `O gestor quer reenviar uma cobrança sobre uma tarefa existente.\nCOMANDO: "${freeText}"\nResponda SOMENTE com JSON valido:\n{"assignee":"nome da pessoa a cobrar (apenas primeiro nome)","task_keywords":["palavras-chave do assunto da tarefa separadas"]}`;
+            let renudgeAssignee = "";
+            let renudgeKeywords: string[] = [];
+            try {
+              const rnRes = await fetch("https://api.openai.com/v1/chat/completions", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", Authorization: `Bearer ${openaiKeyNL}` },
+                body: JSON.stringify({ model: openaiModelNL, temperature: 0.2, messages: [{ role: "system", content: "Extrai informacoes. Responda SOMENTE com JSON valido." }, { role: "user", content: renudgeParsePrompt }] }),
+              });
+              if (rnRes.ok) {
+                const rnData = await rnRes.json();
+                const rnRaw = String(rnData?.choices?.[0]?.message?.content ?? "").trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+                const rnJson = JSON.parse(rnRaw);
+                renudgeAssignee = String(rnJson.assignee || "").trim();
+                renudgeKeywords = Array.isArray(rnJson.task_keywords) ? rnJson.task_keywords.map((k: unknown) => String(k)) : [];
+              }
+            } catch { /* fallback */ }
+
+            if (!renudgeAssignee) {
+              const m = freeText.match(/\b(?:a|o|pro|pra|para|da|do)\s+([A-ZÀ-Ú][a-zA-ZÀ-Ú]+)/);
+              if (m) renudgeAssignee = m[1];
+            }
+
+            if (renudgeAssignee) {
+              // Search by assignee only, then filter by keywords in title/description
+              const { data: candidateTasks } = await supabase
+                .from("tasks")
+                .select("id, title, description, assignee_name, assignee_phone, task_code, due_date, status")
+                .neq("status", "completed")
+                .ilike("assignee_name", `%${renudgeAssignee}%`)
+                .order("created_at", { ascending: false })
+                .limit(20);
+
+              let matchedTasks = candidateTasks ?? [];
+              // If we have keywords, score tasks by keyword match
+              if (renudgeKeywords.length > 0 && matchedTasks.length > 1) {
+                const scored = matchedTasks.map(t => {
+                  const haystack = `${t.title} ${t.description ?? ""}`.toLowerCase();
+                  const score = renudgeKeywords.filter(kw => haystack.includes(kw.toLowerCase())).length;
+                  return { ...t, score };
+                });
+                scored.sort((a, b) => b.score - a.score);
+                if (scored[0].score > 0) matchedTasks = [scored[0]];
+              }
+
+              const apiUrlRN = sNL["evolution_api_url"]?.replace(/\/$/, "");
+              const apiKeyRN = sNL["evolution_api_key"];
+              const instanceRN = sNL["evolution_instance_name"];
+              const numberOwnerRN = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
+
+              if (matchedTasks.length === 0) {
+                if (apiUrlRN && apiKeyRN && instanceRN) {
+                  await fetch(`${apiUrlRN}/message/sendText/${instanceRN}`, { method: "POST", headers: { "Content-Type": "application/json", apikey: apiKeyRN }, body: JSON.stringify({ number: numberOwnerRN, text: `Nao encontrei tarefa pendente para "${renudgeAssignee}". Verifique o nome ou tente com o codigo (ex: ATOM-1017).` }) });
+                }
+                return new Response(JSON.stringify({ renudge: false, reason: "not_found" }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+              }
+
+              const task = matchedTasks[0];
+              const taskCode = task.task_code ?? "";
+              const fmtDueRN = (iso: string | null) => {
+                if (!iso) return "sem prazo";
+                const d = new Date(new Date(iso).getTime() - 3 * 60 * 60 * 1000);
+                return `${String(d.getUTCDate()).padStart(2,"0")}/${String(d.getUTCMonth()+1).padStart(2,"0")} ${String(d.getUTCHours()).padStart(2,"0")}:${String(d.getUTCMinutes()).padStart(2,"0")}`;
+              };
+
+              let renudgeMsg = `Oi ${(task.assignee_name ?? "").split(" ")[0]}! Aqui e a GIA, assistente do Sr. ${ownerName}.\n\nPassando para lembrar sobre: *"${task.title}"*.\n\nAinda aguardamos a conclusao. Ao finalizar, responda: *${taskCode} concluido*`;
+              try {
+                const rmRes = await fetch("https://api.openai.com/v1/chat/completions", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json", Authorization: `Bearer ${openaiKeyNL}` },
+                  body: JSON.stringify({ model: openaiModelNL, temperature: 0.5, messages: [
+                    { role: "system", content: `Voce e a GIA, assistente executiva do Sr. ${ownerName}. Escreva mensagens de recobranca humanizadas e diretas. Use emojis moderadamente.${sNL["ai_system_prompt"] ? "\n" + sNL["ai_system_prompt"] : ""}` },
+                    { role: "user", content: `Gere mensagem de re-cobranca para:\nResponsavel: ${task.assignee_name}\nTarefa: ${task.title}\nDescricao: ${task.description || "sem descricao"}\nPrazo original: ${fmtDueRN(task.due_date)}\n\nA mensagem DEVE terminar com: "Ao concluir, responda: ${taskCode} concluido"\nUse emojis moderadamente. Nao inclua nada alem da mensagem final.` },
+                  ]}),
+                });
+                if (rmRes.ok) {
+                  const rmData = await rmRes.json();
+                  const rmContent = String(rmData?.choices?.[0]?.message?.content ?? "").trim();
+                  if (rmContent) renudgeMsg = rmContent;
+                }
+              } catch { /* use fallback */ }
+
+              await supabase.from("pending_message_approvals").insert({
+                owner_jid: remoteJid,
+                task_draft: { title: task.title, description: task.description ?? "", priority: "medium", recurrence: "none", recurrence_interval: 1, due_date: task.due_date, first_nudge_at: null, nudge_repeat_hours: 0, nudge_active: false, gia_instruction: "", send_now: true, scheduled_send: null, is_renudge: true, existing_task_id: task.id },
+                proposed_message: renudgeMsg,
+                assignee_name: task.assignee_name,
+                assignee_phone: task.assignee_phone,
+                status: "pending",
+              });
+
+              if (apiUrlRN && apiKeyRN && instanceRN) {
+                const approvalMsg =
+                  `Re-cobranca para *${task.assignee_name}* (${taskCode}):\n\n` +
+                  `---\n${renudgeMsg}\n---\n\n` +
+                  `// Envio: AGORA\n` +
+                  (task.due_date ? `// Prazo original: ${fmtDueRN(task.due_date)}\n` : "") +
+                  `\nPosso mandar? Responda *ok* para aprovar ou *nao* para cancelar.`;
+                await fetch(`${apiUrlRN}/message/sendText/${instanceRN}`, { method: "POST", headers: { "Content-Type": "application/json", apikey: apiKeyRN }, body: JSON.stringify({ number: numberOwnerRN, text: approvalMsg }) });
+              }
+
+              await logEvent("renudge-approval-created", `task=${task.id} assignee="${task.assignee_name}"`);
+              return new Response(JSON.stringify({ renudge: true, awaiting_approval: true, task_id: task.id }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+            }
+          }
+          // ── END RE-NUDGE FLOW ─────────────────────────────────────────────────
+
+          const needsConfirmation = /\bconfirma[cç][aã]o\b/i.test(freeText);
+
           const parsePrompt = `Voce e a GIA, assistente executiva. O gestor enviou este comando por WhatsApp em linguagem natural. Extraia as informacoes estruturadas.
 
 HOJE: ${todayISO} (${todayDayName})
 NOME DO GESTOR: ${ownerName}
-
+${needsConfirmation ? "\nATENCAO: O gestor usou a palavra 'confirmacao'. A mensagem DEVE incluir obrigatoriamente: 'Ao concluir, responda: ATOM-XXXX concluido'\n" : ""}
 COMANDO: "${freeText}"
 
 Responda APENAS com JSON valido (sem markdown, sem crase), com estes campos:
@@ -1170,7 +1326,7 @@ Responda APENAS com JSON valido (sem markdown, sem crase), com estes campos:
   "recurrence_interval": 1,
   "nudge": true,
   "instruction": "instrucao de COMO a GIA deve agir - ex: 'seja firme', 'apenas envie sem pedir resposta', 'cobre normalmente'",
-  "proposed_message": "a mensagem EXATA que a GIA deve enviar para o destinatario, escrita de forma natural como se fosse a assistente do gestor falando com a pessoa/grupo. SEMPRE inclua no final da mensagem a instrucao de conclusao no formato: 'Ao concluir, responda: ATOM-XXXX concluido'. Use ATOM-XXXX como placeholder (sera substituido pelo codigo real). A menos que o gestor diga explicitamente para NAO pedir resposta."
+  "proposed_message": "a mensagem EXATA que a GIA deve enviar para o destinatario, escrita de forma natural e humanizada. Use emojis de forma moderada. SEMPRE inclua no final: 'Ao concluir, responda: ATOM-XXXX concluido'. Use ATOM-XXXX como placeholder. A menos que o gestor diga explicitamente para NAO pedir resposta."
 }
 
 REGRAS CRITICAS - DESTINO (PARA ONDE ENVIAR):
@@ -1195,8 +1351,9 @@ REGRAS CRITICAS - HORARIO DE ENVIO vs PRAZO FINAL:
 REGRAS GERAIS:
 - Se o gestor quer ENVIAR uma mensagem (perguntar algo, pedir algo, avisar), o proposed_message deve ser essa mensagem escrita de forma profissional e cordial
 - Se o gestor quer COBRAR algo, nudge=true e a instrucao deve refletir o tom (firme, educado, etc)
-- O proposed_message deve ser escrito na primeira pessoa como a GIA (Ex: "Ola! Aqui e a GIA, Executive Advisor do Sr. ${ownerName}. Ele gostaria de saber...")
-- SEMPRE inclua no final da proposed_message a instrucao: "Ao concluir, responda: ATOM-XXXX concluido" (o placeholder ATOM-XXXX sera substituido pelo codigo real automaticamente). A menos que o gestor explicitamente diga para nao pedir resposta/status
+- O proposed_message deve ser escrito na primeira pessoa como a GIA (Ex: "Ola! Aqui e a GIA, Executive Advisor do Sr. ${ownerName}...")
+- Use emojis de forma natural e moderada no proposed_message
+- SEMPRE inclua no final da proposed_message: "Ao concluir, responda: ATOM-XXXX concluido" (sera substituido pelo codigo real). A menos que o gestor diga para nao pedir resposta${needsConfirmation ? "\n- REGRA ABSOLUTA: O gestor usou 'confirmacao', a linha 'Ao concluir, responda: ATOM-XXXX concluido' e OBRIGATORIA" : ""}
 - Se nao ha destinatario claro, deixe assignee vazio
 - Se o gestor menciona dia da semana (ex: "na segunda-feira"), calcule a data ISO correta a partir de hoje ${todayISO}
 - Se o gestor menciona horario (ex: "08:30hr"), inclua no campo correto (scheduled_send_iso ou due_date_iso conforme contexto)
