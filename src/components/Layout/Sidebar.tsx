@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, SquareKanban as KanbanSquare, Bot, ChartBar as BarChart3, Users, FileText, CalendarClock, ListChecks, Settings as SettingsIcon, Sparkles, Menu, X, Crown } from 'lucide-react';
+import { LayoutDashboard, SquareKanban as KanbanSquare, Bot, ChartBar as BarChart3, Users, FileText, CalendarClock, ListChecks, Settings as SettingsIcon, Sparkles, Menu, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
 type NavItem = { to: string; label: string; Icon: LucideIcon; exact?: boolean };
@@ -14,7 +14,6 @@ const primary: NavItem[] = [
 
 const secondary: NavItem[] = [
   { to: '/contacts', label: 'Contatos', Icon: Users },
-  { to: '/clevel-groups', label: 'Grupos C-LEVEL', Icon: Crown },
   { to: '/templates', label: 'Templates', Icon: FileText },
   { to: '/scheduling', label: 'Agendamentos', Icon: CalendarClock },
   { to: '/logs', label: 'Logs de Envio', Icon: ListChecks },

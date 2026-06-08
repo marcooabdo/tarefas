@@ -9,7 +9,6 @@ import { Templates } from './pages/Templates';
 import { Scheduling } from './pages/Scheduling';
 import { Settings } from './pages/Settings';
 import { Logs } from './pages/Logs';
-import { CLevelGroups } from './pages/CLevelGroups';
 
 export default function App() {
   return (
@@ -21,7 +20,7 @@ export default function App() {
           <Route path="/automation" element={<Automation />} />
           <Route path="/reports" element={<Reports />} />
           <Route path="/contacts" element={<Contacts />} />
-          <Route path="/clevel-groups" element={<CLevelGroups />} />
+
           <Route path="/templates" element={<Templates />} />
           <Route path="/scheduling" element={<Scheduling />} />
           <Route path="/logs" element={<Logs />} />
