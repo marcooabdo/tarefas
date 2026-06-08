@@ -2172,6 +2172,15 @@ Se nao e uma acao especial, apenas responda normalmente como assistente.`;
     const autoReply = settings["ai_auto_reply"] !== "false";
     const isGroup = remoteJid.endsWith("@g.us");
 
+    // Skip groups that belong to other systems (e.g. financial)
+    const excludedJids = (settings["excluded_group_jids"] ?? "").split(",").map((s: string) => s.trim()).filter(Boolean);
+    if (isGroup && excludedJids.includes(remoteJid)) {
+      await logEvent("ignored-excluded-group", `jid=${remoteJid}`);
+      return new Response(JSON.stringify({ ignored: "excluded_group" }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
     if (!autoRead && isGroup) {
       await logEvent("ignored-group", "ai_auto_read_groups disabled");
       return new Response(JSON.stringify({ ignored: "group auto-read disabled" }), {

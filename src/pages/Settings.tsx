@@ -6,7 +6,9 @@ interface SettingsState {
   evolution_api_url: string;
   evolution_api_key: string;
   evolution_instance_name: string;
+  gia_phone: string;
   gia_report_phone: string;
+  excluded_group_jids: string;
   default_nudge_hours: string;
   default_repeat_hours: string;
   default_max_nudges: string;
@@ -17,7 +19,9 @@ export function Settings() {
     evolution_api_url: '',
     evolution_api_key: '',
     evolution_instance_name: '',
+    gia_phone: '',
     gia_report_phone: '',
+    excluded_group_jids: '',
     default_nudge_hours: '1',
     default_repeat_hours: '4',
     default_max_nudges: '0',
@@ -49,7 +53,8 @@ export function Settings() {
       .from('app_settings')
       .select('key, value')
       .in('key', [
-        'evolution_api_url', 'evolution_api_key', 'evolution_instance_name', 'gia_report_phone',
+        'evolution_api_url', 'evolution_api_key', 'evolution_instance_name', 'gia_phone',
+        'gia_report_phone', 'excluded_group_jids',
         'default_nudge_hours', 'default_repeat_hours', 'default_max_nudges',
       ]);
     const map: Record<string, string> = {};
@@ -58,7 +63,9 @@ export function Settings() {
       evolution_api_url: map.evolution_api_url ?? '',
       evolution_api_key: map.evolution_api_key ?? '',
       evolution_instance_name: map.evolution_instance_name ?? '',
+      gia_phone: map.gia_phone ?? '',
       gia_report_phone: map.gia_report_phone ?? '',
+      excluded_group_jids: map.excluded_group_jids ?? '',
       default_nudge_hours: map.default_nudge_hours ?? '1',
       default_repeat_hours: map.default_repeat_hours ?? '4',
       default_max_nudges: map.default_max_nudges ?? '0',
@@ -335,6 +342,16 @@ export function Settings() {
                 />
               </Field>
 
+              <Field label="Telefone da GIA (WhatsApp)" hint="Número do WhatsApp da GIA para detectar @menções em grupos (ex: 553491368788)">
+                <input
+                  className="nx-input"
+                  type="tel"
+                  placeholder="553491368788"
+                  value={settings.gia_phone}
+                  onChange={(e) => setSettings({ ...settings, gia_phone: e.target.value.replace(/\D/g, '') })}
+                />
+              </Field>
+
               <Field label="WhatsApp para Relatórios (GIA)" hint="Número que recebe o relatório de tarefas vencidas (ex: 5534999990000)">
                 <input
                   className="nx-input"
@@ -342,6 +359,17 @@ export function Settings() {
                   placeholder="5534999990000"
                   value={settings.gia_report_phone}
                   onChange={(e) => setSettings({ ...settings, gia_report_phone: e.target.value.replace(/\D/g, '') })}
+                />
+              </Field>
+
+              <Field label="Grupos Excluídos (outros sistemas)" hint="JIDs de grupos que a GIA deve ignorar completamente (ex: outro sistema financeiro). Separe por vírgula.">
+                <textarea
+                  className="nx-input"
+                  placeholder="120363023115206461@g.us, 120363023944377449@g.us"
+                  value={settings.excluded_group_jids}
+                  onChange={(e) => setSettings({ ...settings, excluded_group_jids: e.target.value })}
+                  rows={2}
+                  style={{ resize: 'vertical', fontFamily: 'monospace', fontSize: '12px' }}
                 />
               </Field>
             </div>
