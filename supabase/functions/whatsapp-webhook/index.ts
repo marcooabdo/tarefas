@@ -1842,20 +1842,45 @@ REGRAS GERAIS:
         const ownerNameChat = (rawOwnerChat && rawOwnerChat.toLowerCase() !== "eu") ? rawOwnerChat : "Marco Abdo";
 
         if (openaiKeyChat && apiUrlChat && apiKeyChat && instanceChat) {
-          // Get recent tasks for context
-          const { data: recentTasks } = await supabase
-            .from("tasks")
-            .select("id, task_code, title, assignee_name, status, due_date, gia_instruction")
-            .order("created_at", { ascending: false })
-            .limit(20);
-
-          // Get pending approvals for context
-          const { data: pendingApprovals } = await supabase
-            .from("pending_message_approvals")
-            .select("id, assignee_name, proposed_message, status, created_at")
-            .eq("status", "pending")
-            .order("created_at", { ascending: false })
-            .limit(5);
+          const [
+            { data: recentTasks },
+            { data: pendingApprovals },
+            { data: allContacts },
+            { data: clevelGroups },
+            { data: activeSchedules },
+            { data: recentLogs },
+          ] = await Promise.all([
+            supabase
+              .from("tasks")
+              .select("id, task_code, title, assignee_name, status, due_date, gia_instruction, created_at, completed_at, assignee_phone")
+              .order("created_at", { ascending: false })
+              .limit(30),
+            supabase
+              .from("pending_message_approvals")
+              .select("id, assignee_name, proposed_message, status, created_at")
+              .eq("status", "pending")
+              .order("created_at", { ascending: false })
+              .limit(5),
+            supabase
+              .from("contacts")
+              .select("name, phone, department, is_group, remote_jid, active")
+              .eq("active", true)
+              .order("name"),
+            supabase
+              .from("clevel_groups")
+              .select("label, city, active, contact_id")
+              .eq("active", true),
+            supabase
+              .from("schedules")
+              .select("name, send_time, days_of_week, active, send_once")
+              .eq("active", true)
+              .order("send_time"),
+            supabase
+              .from("send_logs")
+              .select("contact_name, template_name, message_content, status, sent_at")
+              .order("sent_at", { ascending: false })
+              .limit(15),
+          ]);
 
           const nowBRChat = new Date(Date.now() - 3 * 60 * 60 * 1000);
           const todayISOChat = nowBRChat.toISOString().slice(0, 10);
@@ -1870,45 +1895,73 @@ REGRAS GERAIS:
             ? "\n\nAPROVACOES PENDENTES:\n" + pendingApprovals!.map(a => `- Para ${a.assignee_name}: "${(a.proposed_message ?? "").slice(0, 60)}..."`).join("\n")
             : "";
 
+          const contactsList = (allContacts ?? []).map(c => {
+            const type = c.is_group ? "GRUPO" : "PESSOA";
+            return `- ${c.name} (${type}) | tel: ${c.phone ?? ""} | dept: ${c.department ?? ""} | jid: ${c.remote_jid ?? ""}`;
+          }).join("\n");
+
+          const clevelList = (clevelGroups ?? []).map(g =>
+            `- ${g.label} | cidade: ${g.city ?? ""}`
+          ).join("\n");
+
+          const schedulesList = (activeSchedules ?? []).map(s =>
+            `- "${s.name}" | horario: ${s.send_time} | dias: ${(s.days_of_week ?? []).join(",")} | unico: ${s.send_once ? "sim" : "nao"}`
+          ).join("\n");
+
+          const logsList = (recentLogs ?? []).map(l =>
+            `- [${l.sent_at?.slice(0, 16) ?? "?"}] → ${l.contact_name}: "${(l.message_content ?? "").slice(0, 50)}..." (${l.status})`
+          ).join("\n");
+
+          const groupContacts = (allContacts ?? []).filter(c => c.is_group);
+          const personContacts = (allContacts ?? []).filter(c => !c.is_group);
+
           const chatPrompt = `${systemPromptChat}
 
-Voce e a GIA, Executive Advisor do Sr. ${ownerNameChat}. O gestor (${ownerNameChat}) esta falando DIRETAMENTE com voce via WhatsApp. Responda de forma natural, inteligente e util.
+Voce e a GIA, Executive Advisor do Sr. ${ownerNameChat}. O gestor (${ownerNameChat}) esta falando DIRETAMENTE com voce via WhatsApp. Voce e proativa, inteligente, e conversa naturalmente. Responda com base nos dados reais que voce tem acesso.
 
 HOJE: ${todayISOChat} (${todayDayNameChat})
 HORA ATUAL (Brasilia): ${nowBRChat.toISOString().slice(11, 16)}
 
-TAREFAS RECENTES:
+═══ TAREFAS (${(recentTasks ?? []).length} mais recentes) ═══
 ${tasksContext || "(nenhuma tarefa)"}${pendingContext}
 
-CAPACIDADES:
-- Voce gerencia tarefas, agendamentos e cobranças
-- Se o gestor pedir para alterar algo (ex: "ATOM-1017 altere o envio para AGORA"), voce deve confirmar e executar
-- Se o gestor perguntar algo, responda com base no contexto das tarefas
-- Seja sempre concisa e direta, sem enrolacao
+═══ CONTATOS SALVOS (${personContacts.length} pessoas, ${groupContacts.length} grupos) ═══
+${contactsList || "(nenhum contato)"}
+
+═══ GRUPOS C-LEVEL CADASTRADOS ═══
+${clevelList || "(nenhum grupo C-LEVEL)"}
+
+═══ AGENDAMENTOS ATIVOS ═══
+${schedulesList || "(nenhum agendamento)"}
+
+═══ ULTIMOS ENVIOS ═══
+${logsList || "(nenhum envio recente)"}
+
+COMPORTAMENTO:
+- Voce TEM ACESSO a todos os dados acima. Quando o gestor perguntar sobre contatos, grupos, tarefas, envios, agendamentos, CONSULTE os dados e responda com informacoes reais.
+- Se o gestor perguntar "quais grupos C-LEVEL voce esta?", liste os grupos com nome C-LEVEL dos CONTATOS SALVOS (is_group=true).
+- Se perguntar "quem e responsavel pela tarefa X?", busque nas tarefas.
+- Se perguntar "o que foi enviado hoje?", busque nos ultimos envios.
+- Se perguntar sobre uma pessoa, busque nos contatos.
+- Seja CONVERSACIONAL: faca perguntas de volta, sugira acoes, antecipe necessidades.
+- Seja concisa mas completa. Use listas quando fizer sentido.
 - SIGA RIGOROSAMENTE as instrucoes do system prompt acima (emojis, tom, formato, etc)
-- Se voce nao pode executar uma acao diretamente, explique o que vai fazer
+- Se o gestor pedir algo que voce nao consegue resolver com os dados disponiveis, explique o que voce sabe e sugira alternativas.
 
-ACAO ESPECIAL - ALTERAR AGENDAMENTO:
-Se o gestor pedir para alterar o horario de envio de uma tarefa (ex: "ATOM-1017 envie agora", "mude o prazo da ATOM-X para amanha"):
-- Responda com JSON no formato: {"action": "reschedule", "task_code": "ATOM-XXXX", "new_due_date": "ISO8601", "send_now": true/false}
-- Se "agora"/"imediatamente" → send_now=true
-- APOS o JSON, adicione a mensagem de confirmacao separada por |||
+ACOES ESPECIAIS (responda com JSON + ||| + mensagem de confirmacao):
 
-ACAO ESPECIAL - ALTERAR STATUS:
-Se o gestor pedir para mover/alterar o status de uma tarefa (ex: "move a ATOM-1028 para Aguardando Resposta", "muda o status da ATOM-X para concluido"):
-- Responda com JSON no formato: {"action": "update_status", "task_code": "ATOM-XXXX", "new_status": "STATUS"}
-- Valores validos para new_status: "pending", "in_progress", "awaiting_response", "completed", "cancelled"
-- Mapeamento: "pendente" → "pending", "em andamento" → "in_progress", "aguardando resposta" / "IA cobrando" → "awaiting_response", "concluido"/"concluída" → "completed", "cancelado" → "cancelled"
-- APOS o JSON, adicione a mensagem de confirmacao separada por |||
+1. ALTERAR AGENDAMENTO:
+{"action": "reschedule", "task_code": "ATOM-XXXX", "new_due_date": "ISO8601", "send_now": true/false}
 
-ACAO ESPECIAL - CRIAR TAREFA:
-Se o gestor pedir para criar uma tarefa, enviar mensagem, fazer cobranca, criar lembrete, ou qualquer acao que envolva criar algo novo (inclusive tarefas recorrentes para grupos):
-- Responda com JSON no formato: {"action": "create_task", "command": "COMANDO COMPLETO DO GESTOR COPIADO LITERALMENTE"}
-- O campo "command" deve conter o pedido EXATO do gestor para ser processado pelo sistema de criacao de tarefas
-- Isso inclui: criar tarefa, enviar mensagem para alguem, cobrar algo, lembrete, tarefa recorrente, etc
-- APOS o JSON, adicione a mensagem de confirmacao separada por |||
+2. ALTERAR STATUS:
+{"action": "update_status", "task_code": "ATOM-XXXX", "new_status": "pending|in_progress|awaiting_response|completed|cancelled"}
+Mapeamento: "pendente"→"pending", "em andamento"→"in_progress", "aguardando resposta"/"IA cobrando"→"awaiting_response", "concluido"→"completed", "cancelado"→"cancelled"
 
-Se nao e uma acao especial, apenas responda normalmente como assistente.`;
+3. CRIAR TAREFA / ENVIAR MENSAGEM / COBRANCA:
+{"action": "create_task", "command": "COMANDO COMPLETO DO GESTOR COPIADO LITERALMENTE"}
+Inclui: criar tarefa, enviar mensagem, cobrar, lembrete, tarefa recorrente, broadcast para grupos, etc.
+
+Se nao e uma acao especial, apenas responda normalmente como assistente inteligente.`;
 
           try {
             const aiResChat = await fetch("https://api.openai.com/v1/chat/completions", {
