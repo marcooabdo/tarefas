@@ -43,12 +43,16 @@ Deno.serve(async (req: Request) => {
 
     const forwards = allUrls.map(async (url) => {
       try {
+        const isLocal = url.startsWith(supabaseUrl);
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json",
+        };
+        if (isLocal) {
+          headers["Authorization"] = `Bearer ${serviceKey}`;
+        }
         const res = await fetch(url, {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${serviceKey}`,
-          },
+          headers,
           body: rawBody,
           signal: AbortSignal.timeout(25000),
         });
