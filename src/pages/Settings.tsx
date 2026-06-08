@@ -9,6 +9,7 @@ interface SettingsState {
   gia_phone: string;
   gia_report_phone: string;
   excluded_group_jids: string;
+  relay_webhook_urls: string;
   default_nudge_hours: string;
   default_repeat_hours: string;
   default_max_nudges: string;
@@ -22,6 +23,7 @@ export function Settings() {
     gia_phone: '',
     gia_report_phone: '',
     excluded_group_jids: '',
+    relay_webhook_urls: '',
     default_nudge_hours: '1',
     default_repeat_hours: '4',
     default_max_nudges: '0',
@@ -40,9 +42,13 @@ export function Settings() {
   const [webhookInfo, setWebhookInfo] = useState<{ url?: string; enabled?: boolean; events?: string[] } | null>(null);
   const [checkingWebhook, setCheckingWebhook] = useState(false);
 
-  const webhookUrl = useMemo(
-    () => `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/whatsapp-webhook`,
+  const relayUrl = useMemo(
+    () => `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/webhook-relay`,
     []
+  );
+  const webhookUrl = useMemo(
+    () => settings.relay_webhook_urls.trim() ? relayUrl : `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/whatsapp-webhook`,
+    [relayUrl, settings.relay_webhook_urls]
   );
 
   useEffect(() => { loadSettings(); }, []);
@@ -54,7 +60,7 @@ export function Settings() {
       .select('key, value')
       .in('key', [
         'evolution_api_url', 'evolution_api_key', 'evolution_instance_name', 'gia_phone',
-        'gia_report_phone', 'excluded_group_jids',
+        'gia_report_phone', 'excluded_group_jids', 'relay_webhook_urls',
         'default_nudge_hours', 'default_repeat_hours', 'default_max_nudges',
       ]);
     const map: Record<string, string> = {};
@@ -66,6 +72,7 @@ export function Settings() {
       gia_phone: map.gia_phone ?? '',
       gia_report_phone: map.gia_report_phone ?? '',
       excluded_group_jids: map.excluded_group_jids ?? '',
+      relay_webhook_urls: map.relay_webhook_urls ?? '',
       default_nudge_hours: map.default_nudge_hours ?? '1',
       default_repeat_hours: map.default_repeat_hours ?? '4',
       default_max_nudges: map.default_max_nudges ?? '0',
@@ -372,6 +379,22 @@ export function Settings() {
                   style={{ resize: 'vertical', fontFamily: 'monospace', fontSize: '12px' }}
                 />
               </Field>
+
+              <Field label="Webhook Relay - URLs Extras" hint="Se a mesma instancia Evolution e usada por outros sistemas (ex: financeiro), cole aqui a URL do webhook do outro sistema. A GIA vai repassar as mensagens para la tambem. Separe multiplas URLs por virgula.">
+                <textarea
+                  className="nx-input"
+                  placeholder="https://outro-sistema.supabase.co/functions/v1/whatsapp-webhook"
+                  value={settings.relay_webhook_urls}
+                  onChange={(e) => setSettings({ ...settings, relay_webhook_urls: e.target.value })}
+                  rows={2}
+                  style={{ resize: 'vertical', fontFamily: 'monospace', fontSize: '12px' }}
+                />
+              </Field>
+              {settings.relay_webhook_urls.trim() && (
+                <div style={{ padding: '10px 14px', borderRadius: '8px', background: 'rgba(0,229,255,0.08)', border: '1px solid rgba(0,229,255,0.25)', fontSize: '12px', color: '#94a3b8' }}>
+                  Relay ativo: o webhook registrado na Evolution sera <code style={{ color: '#00e5ff' }}>{relayUrl}</code> que repassa para a GIA + as URLs acima.
+                </div>
+              )}
             </div>
 
             <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '22px' }}>
