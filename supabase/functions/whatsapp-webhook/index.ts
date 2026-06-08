@@ -2337,14 +2337,23 @@ Se nao e uma acao especial, apenas responda normalmente como assistente intelige
       });
     }
 
-    // Only process if: (1) message is exactly 1/2/3, (2) has task code, or (3) has gia_instruction and was nudged recently
+    // Only process if: (1) message is exactly 1/2/3, (2) has task code, (3) has gia_instruction and was nudged recently, or (4) short intent reply with recent nudge
     const giaInstr = String(match.gia_instruction ?? "").trim();
     let intent: Intent = classify(text);
     const lastNudge = match.last_ai_nudge ? new Date(String(match.last_ai_nudge)).getTime() : 0;
     const nudgedRecently = Date.now() - lastNudge < 48 * 60 * 60 * 1000; // 48h window
 
-    // If intent is unknown and no task code was explicitly referenced, ignore (don't interfere with casual chat)
-    if (intent === "unknown" && !code && !giaInstr) {
+    // Short replies (1/2/3 or status keywords) to a recent nudge should always be processed
+    const isShortReply = /^\s*[123]\s*$/.test(text) ||
+      /\b(conclu[ií]d[oa]?|finalizado|feito|pronto|done|terminado|andamento|fazendo|executando|bloquead[oa]?|travad[oa]?|impedid[oa]?|enviado|enviada|sim|nao|não|ok)\b/i.test(text);
+
+    // Map short replies 1/2/3 to intents when nudged recently
+    if (intent === "unknown" && nudgedRecently && /^\s*1\s*$/.test(text)) intent = "completed";
+    if (intent === "unknown" && nudgedRecently && /^\s*2\s*$/.test(text)) intent = "in_progress";
+    if (intent === "unknown" && nudgedRecently && /^\s*3\s*$/.test(text)) intent = "blocked";
+
+    // If intent is unknown and no task code was explicitly referenced, check if it's a valid response to a nudge
+    if (intent === "unknown" && !code && !giaInstr && !(isShortReply && nudgedRecently)) {
       await logEvent("ignored-casual-chat", `from=${match.assignee_name} text="${text.slice(0, 40)}"`);
       return new Response(JSON.stringify({ matched: false, reason: "casual_chat" }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -2365,8 +2374,8 @@ Se nao e uma acao especial, apenas responda normalmente como assistente intelige
     let recurred = false;
     let aiInterpretation = "";
 
-    // If gia_instruction exists and classify returns unknown, use GPT to interpret
-    if (giaInstr && intent === "unknown" && nudgedRecently) {
+    // If task was nudged recently and intent is still unknown, use GPT to interpret the response
+    if (intent === "unknown" && nudgedRecently && (giaInstr || isShortReply)) {
       const openaiKeyInt = settings["openai_api_key"] ?? "";
       const openaiModelInt = settings["openai_model"] || "gpt-4o-mini";
       if (openaiKeyInt) {
@@ -2476,7 +2485,7 @@ Se nao e uma acao especial, apenas responda normalmente como assistente intelige
     });
 
     let replied = false;
-    if (autoReply && (intent !== "unknown" || giaInstr)) {
+    if (autoReply && (intent !== "unknown" || giaInstr || (isShortReply && nudgedRecently))) {
       const apiUrl = settings["evolution_api_url"]?.replace(/\/$/, "");
       const apiKey = settings["evolution_api_key"];
       const instanceName = settings["evolution_instance_name"];
