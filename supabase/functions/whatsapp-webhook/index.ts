@@ -2181,14 +2181,7 @@ Se nao e uma acao especial, apenas responda normalmente como assistente.`;
       });
     }
 
-    if (!autoRead && isGroup) {
-      await logEvent("ignored-group", "ai_auto_read_groups disabled");
-      return new Response(JSON.stringify({ ignored: "group auto-read disabled" }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-
-    // In groups, only respond if GIA is @mentioned, text says "GIA", has a task code,
+    // In groups, check if GIA is @mentioned, text says "GIA", has a task code,
     // or is a short intent reply (1/2/3/concluido etc.) to a recent nudge
     if (isGroup) {
       const giaPhone = settings["gia_phone"] ?? "";
@@ -2218,7 +2211,17 @@ Se nao e uma acao especial, apenas responda normalmente como assistente.`;
         recentNudgeInGroup = (recentTasks?.length ?? 0) > 0;
       }
 
-      if (!wasMentioned && !mentionedByName && !hasTaskCode && !recentNudgeInGroup) {
+      const giaWasInvoked = wasMentioned || mentionedByName || hasTaskCode || recentNudgeInGroup;
+
+      // If auto_read is off, only process when GIA is directly invoked
+      if (!autoRead && !giaWasInvoked) {
+        await logEvent("ignored-group", "ai_auto_read_groups disabled and no GIA mention");
+        return new Response(JSON.stringify({ ignored: "group auto-read disabled" }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      if (!giaWasInvoked) {
         await logEvent("ignored-group-no-mention", `jid=${remoteJid} text="${text.slice(0, 40)}"`);
         return new Response(JSON.stringify({ ignored: "group_no_mention" }), {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
