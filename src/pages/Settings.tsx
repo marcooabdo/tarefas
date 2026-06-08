@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Save, Plug, CircleCheck as CheckCircle2, CircleAlert as AlertCircle, Eye, EyeOff, Webhook, Copy, Bell } from 'lucide-react';
+import { Save, Plug, CircleCheck as CheckCircle2, CircleAlert as AlertCircle, Eye, EyeOff, Webhook, Copy, Bell, GitFork } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 
 interface SettingsState {
@@ -12,6 +12,7 @@ interface SettingsState {
   default_nudge_hours: string;
   default_repeat_hours: string;
   default_max_nudges: string;
+  webhook_relay_urls: string;
 }
 
 export function Settings() {
@@ -25,6 +26,7 @@ export function Settings() {
     default_nudge_hours: '1',
     default_repeat_hours: '4',
     default_max_nudges: '0',
+    webhook_relay_urls: '',
   });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -40,7 +42,12 @@ export function Settings() {
   const [webhookInfo, setWebhookInfo] = useState<{ url?: string; enabled?: boolean; events?: string[] } | null>(null);
   const [checkingWebhook, setCheckingWebhook] = useState(false);
 
-  const webhookUrl = useMemo(
+  const relayUrl = useMemo(
+    () => `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/webhook-relay`,
+    []
+  );
+
+  const directWebhookUrl = useMemo(
     () => `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/whatsapp-webhook`,
     []
   );
@@ -56,6 +63,7 @@ export function Settings() {
         'evolution_api_url', 'evolution_api_key', 'evolution_instance_name', 'gia_phone',
         'gia_report_phone', 'excluded_group_jids',
         'default_nudge_hours', 'default_repeat_hours', 'default_max_nudges',
+        'webhook_relay_urls',
       ]);
     const map: Record<string, string> = {};
     (data ?? []).forEach((s: any) => (map[s.key] = s.value));
@@ -69,6 +77,7 @@ export function Settings() {
       default_nudge_hours: map.default_nudge_hours ?? '1',
       default_repeat_hours: map.default_repeat_hours ?? '4',
       default_max_nudges: map.default_max_nudges ?? '0',
+      webhook_relay_urls: map.webhook_relay_urls ?? '',
     });
     setLoading(false);
   }
@@ -162,7 +171,7 @@ export function Settings() {
       setWebhookInfo(info);
       if (!info.url) {
         setWebhookMsg({ kind: 'error', text: 'Nenhum webhook configurado na instância. Clique em "Configurar webhook".' });
-      } else if (info.url.trim() !== webhookUrl.trim()) {
+      } else if (info.url.trim() !== relayUrl.trim() && info.url.trim() !== directWebhookUrl.trim()) {
         setWebhookMsg({ kind: 'error', text: `Webhook aponta para outra URL: ${info.url}` });
       } else if (info.enabled === false) {
         setWebhookMsg({ kind: 'error', text: 'Webhook existe mas está desativado.' });
@@ -187,10 +196,11 @@ export function Settings() {
     setWebhookBusy(true);
     try {
       const base = settings.evolution_api_url.replace(/\/$/, '');
+      const targetUrl = settings.webhook_relay_urls.trim() ? relayUrl : directWebhookUrl;
       const body = {
         webhook: {
           enabled: true,
-          url: webhookUrl,
+          url: targetUrl,
           webhookByEvents: false,
           webhookBase64: false,
           events: ['MESSAGES_UPSERT'],
@@ -205,11 +215,12 @@ export function Settings() {
         res = await fetch(`${base}/webhook/set/${encodeURIComponent(settings.evolution_instance_name)}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', apikey: settings.evolution_api_key },
-          body: JSON.stringify({ enabled: true, url: webhookUrl, events: ['MESSAGES_UPSERT'] }),
+          body: JSON.stringify({ enabled: true, url: targetUrl, events: ['MESSAGES_UPSERT'] }),
         });
       }
       if (res.ok) {
-        setWebhookMsg({ kind: 'success', text: 'Webhook configurado com sucesso na Evolution API.' });
+        const relayNote = settings.webhook_relay_urls.trim() ? ' (via Relay - repassando para GIA + sistemas extras)' : '';
+        setWebhookMsg({ kind: 'success', text: `Webhook configurado com sucesso na Evolution API${relayNote}.` });
       } else {
         const txt = await res.text();
         setWebhookMsg({ kind: 'error', text: `Falha ao configurar webhook: HTTP ${res.status} ${txt.slice(0, 140)}` });
@@ -221,9 +232,11 @@ export function Settings() {
     }
   }
 
+  const activeWebhookUrl = settings.webhook_relay_urls.trim() ? relayUrl : directWebhookUrl;
+
   async function copyWebhook() {
     try {
-      await navigator.clipboard.writeText(webhookUrl);
+      await navigator.clipboard.writeText(activeWebhookUrl);
       setCopied(true);
       setTimeout(() => setCopied(false), 1800);
     } catch {}
@@ -403,7 +416,7 @@ export function Settings() {
             </div>
 
             <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '14px' }}>
-              <input className="nx-input" readOnly value={webhookUrl} style={{ fontFamily: 'monospace', fontSize: '12px' }} />
+              <input className="nx-input" readOnly value={activeWebhookUrl} style={{ fontFamily: 'monospace', fontSize: '12px' }} />
               <button className="ghost-btn" onClick={copyWebhook} type="button" title="Copiar URL">
                 <Copy size={13} /> {copied ? 'Copiado' : 'Copiar'}
               </button>
@@ -441,6 +454,63 @@ export function Settings() {
               </button>
               <button className="neon-btn" disabled={webhookBusy} onClick={handleConfigureWebhook} type="button">
                 <Webhook size={14} /> {webhookBusy ? 'Configurando...' : 'Configurar webhook na Evolution'}
+              </button>
+            </div>
+          </section>
+
+          <section className="glass" style={{ padding: '26px', marginBottom: '18px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '18px' }}>
+              <div style={{
+                width: '42px', height: '42px', borderRadius: '11px',
+                background: 'linear-gradient(135deg, rgba(179,71,255,0.18), rgba(0,229,255,0.18))',
+                border: '1px solid rgba(179,71,255,0.35)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+              }}>
+                <GitFork size={20} color="#b347ff" />
+              </div>
+              <div>
+                <h2 style={{ fontSize: '16px', fontWeight: 600, color: '#f4f6fb', margin: 0 }}>Webhook Relay</h2>
+                <p style={{ fontSize: '12px', color: '#9aa3b2', margin: '4px 0 0' }}>
+                  Repasse o webhook da Evolution para varios sistemas ao mesmo tempo (GIA + financeiro, etc).
+                </p>
+              </div>
+            </div>
+
+            <div style={{
+              padding: '12px 14px', borderRadius: '10px', marginBottom: '16px',
+              background: 'rgba(179,71,255,0.06)', border: '1px solid rgba(179,71,255,0.2)',
+              fontSize: '12px', color: '#c6cdda', lineHeight: 1.6,
+            }}>
+              <strong style={{ color: '#b347ff' }}>Como funciona:</strong> A Evolution envia o webhook para o Relay.
+              O Relay repassa automaticamente para a GIA e para todas as URLs extras configuradas abaixo.
+              Assim, dois (ou mais) sistemas funcionam na mesma instancia sem conflito.
+            </div>
+
+            <Field label="URLs extras (um por linha ou separados por virgula)" hint="Cole aqui a URL do webhook do sistema financeiro ou qualquer outro sistema. A GIA ja recebe automaticamente.">
+              <textarea
+                className="nx-input"
+                placeholder="https://xxx.supabase.co/functions/v1/whatsapp-webhook"
+                value={settings.webhook_relay_urls}
+                onChange={(e) => setSettings({ ...settings, webhook_relay_urls: e.target.value })}
+                rows={3}
+                style={{ resize: 'vertical', fontFamily: 'monospace', fontSize: '12px' }}
+              />
+            </Field>
+
+            {settings.webhook_relay_urls.trim() && (
+              <div style={{
+                padding: '10px 14px', borderRadius: '10px', marginTop: '12px',
+                background: 'rgba(16,245,155,0.06)', border: '1px solid rgba(16,245,155,0.2)',
+                fontSize: '12px', color: '#10f59b',
+              }}>
+                Relay ativo. Ao clicar em "Configurar webhook na Evolution" (acima), a URL registrada sera a do Relay.
+                A GIA + {settings.webhook_relay_urls.split(',').map(u => u.trim()).filter(u => u.startsWith('http')).length} URL(s) extra(s) receberao os webhooks.
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '16px' }}>
+              <button className="neon-btn" disabled={saving} onClick={handleSave}>
+                <Save size={14} /> {saving ? 'Salvando...' : 'Salvar'}
               </button>
             </div>
           </section>
