@@ -758,7 +758,18 @@ Deno.serve(async (req: Request) => {
 
         // Use GPT to understand what the owner wants
         let newMessage = "";
-        let ownerIntent: "edit" | "cancel" | "approve" | "new_instruction" = "edit";
+        let ownerIntent: "edit" | "cancel" | "approve" | "new_instruction" | "change_destination" = "edit";
+        let newDestination = "";
+
+        // Load contacts for destination change detection
+        const { data: editContacts } = await supabase
+          .from("contacts")
+          .select("name, is_group, remote_jid, phone")
+          .eq("active", true)
+          .order("name");
+        const editContactsList = (editContacts ?? []).map(c =>
+          `- "${c.name}" (${c.is_group ? "GRUPO" : "PESSOA"})`
+        ).join("\n");
 
         if (openaiKeyEdit) {
           try {
@@ -770,17 +781,22 @@ MENSAGEM ORIGINAL:
 O gestor respondeu com:
 "${text}"
 
+CONTATOS E GRUPOS CADASTRADOS:
+${editContactsList}
+
 Analise a resposta do gestor e responda APENAS com JSON valido:
 {
-  "intent": "edit" ou "cancel" ou "approve" ou "new_instruction",
-  "new_message": "a nova mensagem corrigida para enviar (se intent=edit). Se o gestor forneceu o texto exato, use EXATAMENTE o que ele escreveu. Se ele deu instrucoes de como mudar, aplique as mudancas na mensagem original.",
+  "intent": "edit" ou "cancel" ou "approve" ou "change_destination",
+  "new_message": "a nova mensagem corrigida (se intent=edit). Se o gestor forneceu o texto exato, use EXATAMENTE o que ele escreveu.",
+  "new_destination": "nome EXATO do novo destino da lista de contatos (se intent=change_destination). Use o nome completo como aparece na lista.",
   "explanation": "explicacao curta do que o gestor quer"
 }
 
 REGRAS:
-- Se o gestor fornece uma versao corrigida da mensagem (ex: "Nao, envia assim: ..."), intent=edit e new_message = o texto corrigido que ele forneceu
+- Se o gestor diz que o DESTINO esta errado (ex: "nao, e pro grupo X", "manda pro Y", "nao, envia pra Z"), intent=change_destination e new_destination = nome EXATO do contato/grupo da lista acima. Faca fuzzy match com os nomes da lista.
+- Se o gestor fornece uma versao corrigida da mensagem (ex: "Nao, envia assim: ..."), intent=edit e new_message = o texto corrigido
 - Se o gestor diz pra cancelar/nao enviar, intent=cancel
-- Se o gestor aprova de alguma forma, intent=approve
+- Se o gestor aprova de alguma forma (ok, sim, manda, envia, pode mandar), intent=approve
 - Se o gestor da uma instrucao generica de mudanca (ex: "seja mais firme", "tira a parte do seguro"), intent=edit e voce deve aplicar a mudanca na mensagem original
 - IMPORTANTE: Se o gestor escreve a mensagem inteira de volta com correcoes, use EXATAMENTE o texto dele, nao invente nada
 - A new_message deve manter o tom profissional da GIA como assistente do gestor`;
@@ -805,6 +821,7 @@ REGRAS:
               const parsed = JSON.parse(jsonEdit);
               ownerIntent = parsed.intent || "edit";
               newMessage = String(parsed.new_message || "").trim();
+              newDestination = String(parsed.new_destination || "").trim();
             }
           } catch { /* fallback: treat as literal replacement */ }
         }
@@ -835,6 +852,95 @@ REGRAS:
             JSON.stringify({ approval_cancelled: true, id: approval.id }),
             { headers: { ...corsHeaders, "Content-Type": "application/json" } }
           );
+        }
+
+        if (ownerIntent === "change_destination" && newDestination) {
+          // Find the new contact/group by exact or fuzzy name match
+          const destLower = newDestination.toLowerCase();
+          const matchedContact = (editContacts ?? []).find(c => c.name.toLowerCase() === destLower)
+            ?? (editContacts ?? []).find(c => c.name.toLowerCase().includes(destLower))
+            ?? (editContacts ?? []).find(c => destLower.includes(c.name.toLowerCase()));
+
+          if (matchedContact) {
+            const newPhone = matchedContact.remote_jid
+              ? (matchedContact.is_group ? String(matchedContact.remote_jid) : normalizePhone(String(matchedContact.remote_jid).split("@")[0]))
+              : normalizePhone(String(matchedContact.phone ?? ""));
+            const newName = matchedContact.name;
+
+            // Update the approval with the new destination
+            const draft = approval.task_draft as Record<string, unknown>;
+            if (matchedContact.is_group) draft.group_name = newName;
+
+            // Update proposed_message to reference the new destination name
+            let updatedMsg = String(approval.proposed_message ?? "");
+            const oldNameEsc = approval.assignee_name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            const nameRegex = new RegExp(oldNameEsc, "gi");
+            if (nameRegex.test(updatedMsg)) {
+              updatedMsg = updatedMsg.replace(nameRegex, newName);
+            }
+
+            await supabase
+              .from("pending_message_approvals")
+              .update({
+                assignee_name: newName,
+                assignee_phone: newPhone,
+                proposed_message: updatedMsg,
+                task_draft: draft,
+              })
+              .eq("id", approval.id);
+
+            if (apiUrlEdit && apiKeyEdit && instanceEdit) {
+              const numberEdit = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
+              const shouldNudge = draft.nudge_active ?? false;
+              const reAskMsg =
+                `Entendi! Vou enviar para *${newName}*:\n\n` +
+                `---\n${updatedMsg}\n---\n\n` +
+                (shouldNudge ? `Cobranca ativa: vou acompanhar e cobrar respostas.\n` : `Sem cobranca: apenas envio sem cobrar resposta.\n`) +
+                `\nPosso mandar? Responda *ok* para aprovar ou *nao* para cancelar.`;
+              await fetch(`${apiUrlEdit}/message/sendText/${instanceEdit}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json", apikey: apiKeyEdit },
+                body: JSON.stringify({ number: numberEdit, text: reAskMsg }),
+              });
+            }
+
+            await logEvent("approval-destination-changed", `from="${approval.assignee_name}" to="${newName}"`);
+            return new Response(
+              JSON.stringify({ destination_changed: true, id: approval.id, new_name: newName }),
+              { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
+          } else {
+            // Couldn't find the new destination - list suggestions
+            const suggestions = (editContacts ?? [])
+              .filter(c => {
+                const n = c.name.toLowerCase();
+                const words = destLower.split(/\s+/);
+                return words.some(w => w.length > 2 && n.includes(w));
+              })
+              .slice(0, 5);
+
+            if (apiUrlEdit && apiKeyEdit && instanceEdit) {
+              const numberEdit = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
+              let msg: string;
+              if (suggestions.length > 0) {
+                const lines = suggestions.map((c, i) => `${i + 1} - ${c.name} (${c.is_group ? "grupo" : "pessoa"})`);
+                msg = `Nao encontrei "${newDestination}" exatamente. Voce quis dizer:\n\n${lines.join("\n")}\n\nResponda com o numero ou o nome exato.`;
+              } else {
+                msg = `Nao encontrei "${newDestination}" nos contatos cadastrados. Envie o nome exato do grupo/pessoa ou *nao* para cancelar.`;
+              }
+              await fetch(`${apiUrlEdit}/message/sendText/${instanceEdit}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json", apikey: apiKeyEdit },
+                body: JSON.stringify({ number: numberEdit, text: msg }),
+              });
+            }
+
+            await logEvent("approval-destination-not-found", `dest="${newDestination}"`);
+            return new Response(
+              JSON.stringify({ destination_not_found: true, searched: newDestination }),
+              { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
+          }
         }
 
         if (ownerIntent === "approve") {
@@ -1392,11 +1498,24 @@ REGRAS:
 
           const needsConfirmation = /\bconfirma[cç][aã]o\b/i.test(freeText);
 
+          // Load contacts for the prompt so GPT can match exact names
+          const { data: nlContacts } = await supabase
+            .from("contacts")
+            .select("name, is_group, department")
+            .eq("active", true)
+            .order("name");
+          const nlContactsList = (nlContacts ?? []).map(c =>
+            `- "${c.name}" (${c.is_group ? "GRUPO" : "PESSOA"}${c.department ? `, dept: ${c.department}` : ""})`
+          ).join("\n");
+
           const parsePrompt = `Voce e a GIA, assistente executiva. O gestor enviou este comando por WhatsApp em linguagem natural. Extraia as informacoes estruturadas.
 
 HOJE: ${todayISO} (${todayDayName})
 NOME DO GESTOR: ${ownerName}
 ${needsConfirmation ? "\nATENCAO: O gestor usou a palavra 'confirmacao'. A mensagem DEVE incluir obrigatoriamente: 'Ao concluir, responda: ATOM-XXXX concluido'\n" : ""}
+CONTATOS E GRUPOS CADASTRADOS (use o nome EXATO daqui quando possivel):
+${nlContactsList || "(nenhum contato cadastrado)"}
+
 COMANDO: "${freeText}"
 
 Responda APENAS com JSON valido (sem markdown, sem crase), com estes campos:
@@ -1418,11 +1537,13 @@ Responda APENAS com JSON valido (sem markdown, sem crase), com estes campos:
 
 REGRAS CRITICAS - DESTINO (PARA ONDE ENVIAR):
 - O campo "assignee" e o DESTINO da mensagem: para ONDE a mensagem sera enviada
-- Se o gestor diz "envia NO GRUPO X" ou "manda no grupo X" -> assignee = nome do grupo, is_group = true
-- Se o gestor diz "envia pro fulano" ou "manda pra fulano" -> assignee = nome da pessoa, is_group = false
+- REGRA MAIS IMPORTANTE: Use o nome EXATO de um contato/grupo da lista CONTATOS E GRUPOS CADASTRADOS acima. Faca fuzzy match: se o gestor diz "contabilidade", encontre o grupo que tem "contabilidade" no nome (ex: "Contabilidade Group Global"). Use o nome completo e exato como aparece na lista.
+- Se o gestor diz "envia NO GRUPO X" ou "manda no grupo X" -> assignee = nome EXATO do grupo da lista, is_group = true
+- Se o gestor diz "envia pro fulano" ou "manda pra fulano" -> assignee = nome EXATO da pessoa da lista, is_group = false
 - MUITO IMPORTANTE: Diferencie o DESTINO (onde enviar) do ASSUNTO (sobre quem/o que e a mensagem)
-- Exemplo: "envia no grupo Financeiro o lembrete de pix para Ronaldo" -> assignee = "Financeiro" (destino), is_group = true (a mensagem FALA sobre Ronaldo mas o DESTINO e o grupo)
-- Exemplo: "envia pro Ronaldo pedindo o pix" -> assignee = "Ronaldo" (destino), is_group = false
+- Exemplo: "envia no grupo Financeiro o lembrete de pix para Ronaldo" -> assignee = nome exato do grupo financeiro da lista (destino), is_group = true
+- Exemplo: "envia pro Ronaldo pedindo o pix" -> assignee = nome exato do Ronaldo da lista (destino), is_group = false
+- Se nao encontrar correspondencia na lista, use o nome como o gestor escreveu
 
 REGRAS CRITICAS - HORARIO DE ENVIO vs PRAZO FINAL:
 - "scheduled_send_iso" = QUANDO a mensagem sera DISPARADA (horario do envio)
