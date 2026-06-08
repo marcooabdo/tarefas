@@ -109,6 +109,28 @@ export const DAYS_OF_WEEK = [
   { value: 6, label: 'Sáb' },
 ];
 
+export interface CLevelGroup {
+  id: string;
+  contact_id: string;
+  city: string;
+  label: string;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+  contacts?: Pick<Contact, 'id' | 'name' | 'remote_jid'>;
+}
+
+export interface CLevelBroadcast {
+  id: string;
+  message: string;
+  cities: string[];
+  deadline: string;
+  groups_targeted: number;
+  groups_sent: number;
+  status: string;
+  created_at: string;
+}
+
 export const COUNTRY_CODES = [
   { value: '+55', label: '+55 Brasil' },
   { value: '+1', label: '+1 EUA/Canadá' },
