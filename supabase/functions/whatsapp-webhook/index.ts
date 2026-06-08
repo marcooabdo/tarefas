@@ -317,6 +317,11 @@ Deno.serve(async (req: Request) => {
     msg?.videoMessage?.caption ??
     msg?.text ??
     "";
+  const mentionedJids: string[] =
+    msg?.extendedTextMessage?.contextInfo?.mentionedJid ??
+    msg?.contextInfo?.mentionedJid ??
+    data?.contextInfo?.mentionedJid ??
+    [];
 
   async function logEvent(outcome: string, notes = "") {
     try {
@@ -2172,6 +2177,44 @@ Se nao e uma acao especial, apenas responda normalmente como assistente.`;
       return new Response(JSON.stringify({ ignored: "group auto-read disabled" }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
+    }
+
+    // In groups, only respond if GIA is @mentioned, text says "GIA", has a task code,
+    // or is a short intent reply (1/2/3/concluido etc.) to a recent nudge
+    if (isGroup) {
+      const giaPhone = settings["gia_phone"] ?? "";
+      const giaJid = giaPhone ? `${normalizePhone(giaPhone)}@s.whatsapp.net` : "";
+      const wasMentioned = giaJid
+        ? mentionedJids.some((jid: string) => jid === giaJid || jid.startsWith(normalizePhone(giaPhone)))
+        : false;
+      const mentionedByName = /\b@?\s*gia\b/i.test(text);
+      const hasTaskCode = /\bATOM-\d+\b/i.test(text) || /\bATOM-\d+\b/i.test(
+        msg?.extendedTextMessage?.contextInfo?.quotedMessage?.conversation ??
+        msg?.extendedTextMessage?.contextInfo?.quotedMessage?.extendedTextMessage?.text ?? ""
+      );
+      const isShortIntentReply = /^\s*[123]\s*$/.test(text) ||
+        /\b(conclu[ií]d[oa]?|finalizado|feito|pronto|done|andamento|fazendo|bloquead[oa]?|travad[oa]?)\b/i.test(text);
+
+      // For short intent replies, check if GIA recently nudged this group
+      let recentNudgeInGroup = false;
+      if (isShortIntentReply) {
+        const { data: recentTasks } = await supabase
+          .from("tasks")
+          .select("id")
+          .eq("assignee_phone", remoteJid)
+          .neq("status", "completed")
+          .not("last_ai_nudge", "is", null)
+          .gte("last_ai_nudge", new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString())
+          .limit(1);
+        recentNudgeInGroup = (recentTasks?.length ?? 0) > 0;
+      }
+
+      if (!wasMentioned && !mentionedByName && !hasTaskCode && !recentNudgeInGroup) {
+        await logEvent("ignored-group-no-mention", `jid=${remoteJid} text="${text.slice(0, 40)}"`);
+        return new Response(JSON.stringify({ ignored: "group_no_mention" }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
     }
 
     let match: Record<string, unknown> | null = null;
