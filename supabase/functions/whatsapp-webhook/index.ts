@@ -1259,7 +1259,7 @@ REGRAS:
     // Natural language GIA command: "GIA, envia para fulano..." or "GIA envia..." (no structured fields)
     const giaNLMatch = /^\s*GIA\s*[,\s]+(.+)$/is.exec(text);
     const isStructuredGIA = /^\s*GIA\s*:/i.test(text);
-    if (giaNLMatch && !isStructuredGIA && remoteJid && fromMe) {
+    if (giaNLMatch && !isStructuredGIA && remoteJid) {
       const { data: settingsNL } = await supabase.from("app_settings").select("key, value");
       const sNL: Record<string, string> = {};
       for (const row of settingsNL ?? []) sNL[row.key] = row.value;
@@ -1823,7 +1823,7 @@ REGRAS GERAIS:
     }
 
     // Conversational fallback: owner sends a message that didn't match any specific handler
-    if (fromMe && remoteJid && text && eventName !== "send.message") {
+    if (remoteJid && text && eventName !== "send.message") {
       const { data: settingsChat } = await supabase.from("app_settings").select("key, value");
       const sChat: Record<string, string> = {};
       for (const row of settingsChat ?? []) sChat[row.key] = row.value;
