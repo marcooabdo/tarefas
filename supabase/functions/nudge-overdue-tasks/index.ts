@@ -62,9 +62,12 @@ Deno.serve(async (req: Request) => {
     for (const task of due_now) {
       // Check if there's an exact message to send (from NL approval flow)
       const giaInstr = (task.gia_instruction ?? "").trim();
-      const exactMsgMatch = /^ENVIAR_MENSAGEM_EXATA:\s*([\s\S]+)$/i.exec(giaInstr);
+      const exactMsgMatch = /^ENVIAR_MENSAGEM_EXATA:(?:\[PRAZO:([^\|]*)\|NUDGE_HOURS:([^\|]*)\|INSTRUCTION:([^\]]*)\])?\s*([\s\S]+)$/i.exec(giaInstr);
       if (exactMsgMatch) {
-        const exactMessage = exactMsgMatch[1].trim();
+        const realDeadline = exactMsgMatch[1] || null;
+        const realNudgeHours = Number(exactMsgMatch[2]) || 4;
+        const realInstruction = exactMsgMatch[3] || "";
+        const exactMessage = exactMsgMatch[4].trim().replace(/ATOM-XXXX/g, task.task_code ?? "");
         const isGroup = String(task.assignee_phone).includes("@g.us");
         let number = isGroup ? task.assignee_phone : String(task.assignee_phone).replace(/\D/g, "");
         if (!isGroup && number.length <= 11) number = "55" + number;
@@ -87,13 +90,21 @@ Deno.serve(async (req: Request) => {
           });
 
           if (r.ok) {
-            await supabase.from("tasks").update({
+            const taskUpdate: Record<string, unknown> = {
               ai_interventions: (task.ai_interventions ?? 0) + 1,
               last_ai_nudge: new Date().toISOString(),
               status: "awaiting_response",
-              gia_instruction: "",
-              nudge_active: !!(task.nudge_repeat_hours && task.nudge_repeat_hours > 0),
-            }).eq("id", task.id);
+              gia_instruction: realInstruction,
+            };
+            if (realDeadline) {
+              taskUpdate.due_date = realDeadline;
+              taskUpdate.first_nudge_at = realDeadline;
+              taskUpdate.nudge_active = true;
+              taskUpdate.nudge_repeat_hours = realNudgeHours;
+            } else {
+              taskUpdate.nudge_active = !!(task.nudge_repeat_hours && task.nudge_repeat_hours > 0);
+            }
+            await supabase.from("tasks").update(taskUpdate).eq("id", task.id);
           }
           results.push({ task_id: task.id, status: r.ok ? "sent" : "error" });
         } catch (e) {
