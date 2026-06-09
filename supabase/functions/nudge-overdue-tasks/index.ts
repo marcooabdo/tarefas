@@ -7,6 +7,30 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
 };
 
+function nextDueDate(current: string | null, recurrence: string, interval: number): string | null {
+  const base = current ? new Date(current) : new Date();
+  const n = Math.max(1, interval || 1);
+  const d = new Date(base);
+  switch (recurrence) {
+    case "daily":
+      d.setUTCDate(d.getUTCDate() + n);
+      return d.toISOString();
+    case "weekdays": {
+      d.setUTCDate(d.getUTCDate() + 1);
+      while (d.getUTCDay() === 0 || d.getUTCDay() === 6) d.setUTCDate(d.getUTCDate() + 1);
+      return d.toISOString();
+    }
+    case "weekly":
+      d.setUTCDate(d.getUTCDate() + 7 * n);
+      return d.toISOString();
+    case "monthly":
+      d.setUTCMonth(d.getUTCMonth() + n);
+      return d.toISOString();
+    default:
+      return null;
+  }
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 200, headers: corsHeaders });
@@ -49,13 +73,30 @@ Deno.serve(async (req: Request) => {
 
     const maxNudges = Number(settings["default_max_nudges"] || "0") || 0;
 
-    const due_now = (tasks ?? []).filter((t) => {
+    const due_now_raw = (tasks ?? []).filter((t) => {
       if (maxNudges > 0 && (t.ai_interventions ?? 0) >= maxNudges) return false;
       if (!t.last_ai_nudge) return true;
       if (!t.nudge_repeat_hours || t.nudge_repeat_hours <= 0) return false;
       const lastMs = new Date(t.last_ai_nudge).getTime();
       return now - lastMs >= t.nudge_repeat_hours * 60 * 60 * 1000;
     });
+
+    // Atomically claim tasks to prevent duplicate sends from concurrent invocations.
+    // Update last_ai_nudge NOW; only keep tasks where the update actually matched
+    // (another invocation may have already claimed it).
+    const due_now: typeof due_now_raw = [];
+    for (const t of due_now_raw) {
+      const oldNudge = t.last_ai_nudge ?? "1970-01-01T00:00:00Z";
+      const { count } = await supabase
+        .from("tasks")
+        .update({ last_ai_nudge: nowIso })
+        .eq("id", t.id)
+        .eq("last_ai_nudge", oldNudge)
+        .select("id", { count: "exact", head: true });
+      if (count && count > 0) {
+        due_now.push(t);
+      }
+    }
 
     const results: Array<{ task_id: string; status: string; error?: string }> = [];
 
@@ -202,16 +243,36 @@ Deno.serve(async (req: Request) => {
         });
 
         const isSingle = !task.nudge_repeat_hours || task.nudge_repeat_hours <= 0;
+        const recurrence = String(task.recurrence ?? "none");
+        const recurrenceInterval = Number(task.recurrence_interval ?? 1) || 1;
+        const isRecurring = recurrence !== "none";
+
         if (ok) {
-          await supabase
-            .from("tasks")
-            .update({
-              ai_interventions: (task.ai_interventions ?? 0) + 1,
-              last_ai_nudge: new Date().toISOString(),
-              status: task.status === "completed" ? "completed" : "awaiting_response",
-              nudge_active: !isSingle,
-            })
-            .eq("id", task.id);
+          if (isRecurring) {
+            // Recurring task: reschedule to next occurrence instead of continuing nudges
+            const nextDue = nextDueDate(task.due_date ?? task.first_nudge_at, recurrence, recurrenceInterval);
+            await supabase
+              .from("tasks")
+              .update({
+                ai_interventions: (task.ai_interventions ?? 0) + 1,
+                last_ai_nudge: new Date().toISOString(),
+                status: "pending",
+                due_date: nextDue,
+                first_nudge_at: nextDue,
+                nudge_active: true,
+              })
+              .eq("id", task.id);
+          } else {
+            await supabase
+              .from("tasks")
+              .update({
+                ai_interventions: (task.ai_interventions ?? 0) + 1,
+                last_ai_nudge: new Date().toISOString(),
+                status: task.status === "completed" ? "completed" : "awaiting_response",
+                nudge_active: !isSingle,
+              })
+              .eq("id", task.id);
+          }
         } else {
           await supabase
             .from("tasks")
