@@ -796,7 +796,7 @@ Deno.serve(async (req: Request) => {
 
         // Use GPT to understand what the owner wants
         let newMessage = "";
-        let ownerIntent: "edit" | "cancel" | "approve" | "new_instruction" | "change_destination" = "edit";
+        let ownerIntent: "edit" | "cancel" | "approve" | "new_instruction" | "change_destination" | "make_message_only" = "edit";
         let newDestination = "";
 
         // Load contacts for destination change detection
@@ -824,19 +824,20 @@ ${editContactsList}
 
 Analise a resposta do gestor e responda APENAS com JSON valido:
 {
-  "intent": "edit" ou "cancel" ou "approve" ou "change_destination",
-  "new_message": "a nova mensagem corrigida (se intent=edit). Se o gestor forneceu o texto exato, use EXATAMENTE o que ele escreveu.",
-  "new_destination": "nome EXATO do novo destino da lista de contatos (se intent=change_destination). Use o nome completo como aparece na lista.",
+  "intent": "edit" ou "cancel" ou "approve" ou "change_destination" ou "make_message_only",
+  "new_message": "a nova mensagem corrigida (se intent=edit ou make_message_only). Se o gestor forneceu o texto exato, use EXATAMENTE o que ele escreveu, SEM adicionar nada.",
+  "new_destination": "nome EXATO do novo destino da lista de contatos (se intent=change_destination). Use o nome completo como aparece na lista. Se nao encontrar na lista, use o nome como o gestor escreveu.",
   "explanation": "explicacao curta do que o gestor quer"
 }
 
 REGRAS:
-- Se o gestor diz que o DESTINO esta errado (ex: "nao, e pro grupo X", "manda pro Y", "nao, envia pra Z"), intent=change_destination e new_destination = nome EXATO do contato/grupo da lista acima. Faca fuzzy match com os nomes da lista.
-- Se o gestor fornece uma versao corrigida da mensagem (ex: "Nao, envia assim: ..."), intent=edit e new_message = o texto corrigido
+- Se o gestor diz que o DESTINO esta errado (ex: "nao, e pro grupo X", "manda pro Y", "nao, envia pra Z"), intent=change_destination e new_destination = nome EXATO do contato/grupo da lista acima. Faca fuzzy match com os nomes da lista. Se NAO encontrar correspondencia na lista, use o nome como o gestor escreveu.
+- Se o gestor fornece uma versao corrigida da mensagem (ex: "Nao, envia assim: ...", "Nao, altere pra isso: ..."), intent=edit e new_message = o texto corrigido
 - Se o gestor diz pra cancelar/nao enviar, intent=cancel
 - Se o gestor aprova de alguma forma (ok, sim, manda, envia, pode mandar), intent=approve
+- Se o gestor diz "so envia", "sem criar tarefa", "nao precisa criar tarefa", "so avisa", "mensagem so", "sem cobranca", "sem acompanhamento", intent=make_message_only. Se ele tambem corrigiu o texto, coloque o texto corrigido em new_message. Se nao corrigiu, deixe new_message vazio (vai usar a mensagem original).
 - Se o gestor da uma instrucao generica de mudanca (ex: "seja mais firme", "tira a parte do seguro"), intent=edit e voce deve aplicar a mudanca na mensagem original
-- IMPORTANTE: Se o gestor escreve a mensagem inteira de volta com correcoes, use EXATAMENTE o texto dele, nao invente nada
+- REGRA MAIS IMPORTANTE: Se o gestor escreve a mensagem inteira de volta com correcoes, use EXATAMENTE o texto dele em new_message, caractere por caractere. NAO adicione opcoes 1/2/3, NAO adicione ATOM-XXXX, NAO adicione nada que o gestor nao escreveu. O texto do gestor e sagrado.
 - A new_message deve manter o tom profissional da GIA como assistente do gestor`;
 
             const editRes = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -930,9 +931,10 @@ REGRAS:
             if (apiUrlEdit && apiKeyEdit && instanceEdit) {
               const numberEdit = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
               const shouldNudge = draft.nudge_active ?? false;
+              const previewDest = updatedMsg.replace(/ATOM-XXXX/g, "(codigo gerado automaticamente)");
               const reAskMsg =
                 `Entendi! Vou enviar para *${newName}*:\n\n` +
-                `---\n${updatedMsg}\n---\n\n` +
+                `---\n${previewDest}\n---\n\n` +
                 (shouldNudge ? `Cobranca ativa: vou acompanhar e cobrar respostas.\n` : `Sem cobranca: apenas envio sem cobrar resposta.\n`) +
                 `\nPosso mandar? Responda *ok* para aprovar ou *nao* para cancelar.`;
               await fetch(`${apiUrlEdit}/message/sendText/${instanceEdit}`, {
@@ -948,24 +950,76 @@ REGRAS:
               { headers: { ...corsHeaders, "Content-Type": "application/json" } }
             );
           } else {
-            // Couldn't find the new destination - list suggestions
-            const suggestions = (editContacts ?? [])
-              .filter(c => {
-                const n = c.name.toLowerCase();
-                const words = destLower.split(/\s+/);
-                return words.some(w => w.length > 2 && n.includes(w));
-              })
-              .slice(0, 5);
+            // Not found in contacts - search WhatsApp
+            const whatsappResults = await searchWhatsAppChats(sEdit, newDestination);
+            if (whatsappResults.length === 1) {
+              const chosen = whatsappResults[0];
+              const newPhone = chosen.is_group ? chosen.remote_jid : normalizePhone(chosen.remote_jid.split("@")[0]);
+              const newName = chosen.name;
+              const draftWA = approval.task_draft as Record<string, unknown>;
+              if (chosen.is_group) draftWA.group_name = newName;
 
+              let updatedMsg = String(approval.proposed_message ?? "");
+              const oldNameEsc = approval.assignee_name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+              const nameRegex = new RegExp(oldNameEsc, "gi");
+              if (nameRegex.test(updatedMsg)) updatedMsg = updatedMsg.replace(nameRegex, newName);
+
+              await supabase.from("pending_message_approvals").update({
+                assignee_name: newName, assignee_phone: newPhone,
+                proposed_message: updatedMsg, task_draft: draftWA,
+              }).eq("id", approval.id);
+
+              // Auto-register the contact
+              const { data: existingWA } = await supabase.from("contacts").select("id").eq("remote_jid", chosen.remote_jid).maybeSingle();
+              if (!existingWA) {
+                await supabase.from("contacts").insert({
+                  name: chosen.name, phone: chosen.remote_jid,
+                  country_code: "+55", department: chosen.is_group ? "Grupo" : "",
+                  is_group: chosen.is_group, remote_jid: chosen.remote_jid, active: true,
+                });
+              }
+
+              if (apiUrlEdit && apiKeyEdit && instanceEdit) {
+                const numberEdit = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
+                const previewMsg = updatedMsg.replace(/ATOM-XXXX/g, "(codigo gerado automaticamente)");
+                const reAskMsg =
+                  `Encontrei no WhatsApp! Vou enviar para *${newName}*:\n\n` +
+                  `---\n${previewMsg}\n---\n\n` +
+                  `Posso mandar? Responda *ok* para aprovar ou *nao* para cancelar.`;
+                await fetch(`${apiUrlEdit}/message/sendText/${instanceEdit}`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json", apikey: apiKeyEdit },
+                  body: JSON.stringify({ number: numberEdit, text: reAskMsg }),
+                });
+              }
+
+              await logEvent("approval-destination-changed-whatsapp", `to="${newName}"`);
+              return new Response(
+                JSON.stringify({ destination_changed: true, id: approval.id, new_name: newName }),
+                { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+              );
+            } else if (whatsappResults.length > 1) {
+              // Multiple WhatsApp results - ask confirmation
+              const confirmationNeeded = await askConfirmation(
+                supabase, sEdit, remoteJid, newDestination, whatsappResults,
+                { ...(approval.task_draft as Record<string, unknown>), proposed_message: approval.proposed_message }
+              );
+              if (confirmationNeeded) {
+                await supabase.from("pending_message_approvals")
+                  .update({ status: "expired", resolved_at: new Date().toISOString() })
+                  .eq("id", approval.id);
+                await logEvent("approval-dest-whatsapp-multi", `dest="${newDestination}"`);
+                return new Response(
+                  JSON.stringify({ awaiting_confirmation: true, searched: newDestination }),
+                  { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+                );
+              }
+            }
+
+            // Still not found
             if (apiUrlEdit && apiKeyEdit && instanceEdit) {
               const numberEdit = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
-              let msg: string;
-              if (suggestions.length > 0) {
-                const lines = suggestions.map((c, i) => `${i + 1} - ${c.name} (${c.is_group ? "grupo" : "pessoa"})`);
-                msg = `Nao encontrei "${newDestination}" exatamente. Voce quis dizer:\n\n${lines.join("\n")}\n\nResponda com o numero ou o nome exato.`;
-              } else {
-                msg = `Nao encontrei "${newDestination}" nos contatos cadastrados. Envie o nome exato do grupo/pessoa ou *nao* para cancelar.`;
-              }
+              const msg = `Nao encontrei "${newDestination}" nos contatos nem no WhatsApp. Envie o nome exato do grupo/pessoa ou *nao* para cancelar.`;
               await fetch(`${apiUrlEdit}/message/sendText/${instanceEdit}`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json", apikey: apiKeyEdit },
@@ -981,9 +1035,87 @@ REGRAS:
           }
         }
 
+        if (ownerIntent === "make_message_only") {
+          const draft = approval.task_draft as Record<string, unknown>;
+          draft.message_only = true;
+          draft.nudge_active = false;
+          draft.nudge_repeat_hours = 0;
+          const updatedMsg = newMessage || String(approval.proposed_message ?? "");
+          // Strip ATOM-XXXX and 1/2/3 options from message if present
+          const cleanMsg = updatedMsg
+            .replace(/\n?Por favor, confirme como est[aá] essa tarefa:[\s\S]*?Preciso de ajuda\n?/gi, "")
+            .replace(/\n?1️⃣[\s\S]*?3️⃣[^\n]*/gi, "")
+            .replace(/\n?Ao concluir, responda:.*$/gim, "")
+            .replace(/\n{3,}/g, "\n\n")
+            .trim();
+
+          await supabase
+            .from("pending_message_approvals")
+            .update({ proposed_message: cleanMsg, task_draft: draft })
+            .eq("id", approval.id);
+
+          if (apiUrlEdit && apiKeyEdit && instanceEdit) {
+            const numberEdit = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
+            const reAskMsg =
+              `Entendi! Vou enviar para *${approval.assignee_name}* (sem criar tarefa):\n\n` +
+              `---\n${cleanMsg}\n---\n\n` +
+              `Posso mandar? Responda *ok* para aprovar ou *nao* para cancelar.`;
+            await fetch(`${apiUrlEdit}/message/sendText/${instanceEdit}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", apikey: apiKeyEdit },
+              body: JSON.stringify({ number: numberEdit, text: reAskMsg }),
+            });
+          }
+
+          await logEvent("approval-make-message-only", `approval=${approval.id}`);
+          return new Response(
+            JSON.stringify({ message_only: true, id: approval.id }),
+            { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
         if (ownerIntent === "approve") {
           // Treat as approval - reuse the existing approval logic
           const draft = approval.task_draft as Record<string, unknown>;
+
+          // Handle message_only in approve intent from edit flow
+          if (draft.message_only === true) {
+            if (apiUrlEdit && apiKeyEdit && instanceEdit && approval.proposed_message) {
+              const isGroupMO = String(approval.assignee_phone).includes("@g.us");
+              let numberMO = isGroupMO ? approval.assignee_phone : normalizePhone(approval.assignee_phone);
+              if (!isGroupMO && numberMO.length <= 11) numberMO = "55" + numberMO;
+              await fetch(`${apiUrlEdit}/message/sendText/${instanceEdit}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json", apikey: apiKeyEdit },
+                body: JSON.stringify({ number: numberMO, text: approval.proposed_message }),
+              });
+              await supabase.from("send_logs").insert({
+                contact_name: approval.assignee_name,
+                contact_phone: approval.assignee_phone,
+                template_name: "Mensagem direta (GIA NL)",
+                message_content: approval.proposed_message,
+                status: "sent",
+                sent_at: new Date().toISOString(),
+              });
+            }
+            await supabase.from("pending_message_approvals")
+              .update({ status: "approved", resolved_at: new Date().toISOString() })
+              .eq("id", approval.id);
+            if (apiUrlEdit && apiKeyEdit && instanceEdit) {
+              const numberEdit = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
+              await fetch(`${apiUrlEdit}/message/sendText/${instanceEdit}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json", apikey: apiKeyEdit },
+                body: JSON.stringify({ number: numberEdit, text: `Mensagem enviada para *${approval.assignee_name}*.` }),
+              });
+            }
+            await logEvent("approval-edit-message-only-sent", `approval=${approval.id}`);
+            return new Response(
+              JSON.stringify({ sent: true, message_only: true }),
+              { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
+          }
+
           const { data: createdTask } = await supabase
             .from("tasks")
             .insert({
@@ -1057,9 +1189,10 @@ REGRAS:
             const numberEdit = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
             const draft = approval.task_draft as Record<string, unknown>;
             const shouldNudge = draft.nudge_active ?? false;
+            const previewEdit = newMessage.replace(/ATOM-XXXX/g, "(codigo gerado automaticamente)");
             const reAskMsg =
               `Entendi! Vou enviar para *${approval.assignee_name}*:\n\n` +
-              `---\n${newMessage}\n---\n\n` +
+              `---\n${previewEdit}\n---\n\n` +
               (shouldNudge ? `Cobranca ativa: vou acompanhar e cobrar respostas.\n` : `Sem cobranca: apenas envio sem cobrar resposta.\n`) +
               `\nPosso mandar? Responda *ok* para aprovar ou *nao* para cancelar.`;
             await fetch(`${apiUrlEdit}/message/sendText/${instanceEdit}`, {
@@ -2035,6 +2168,22 @@ REGRAS GERAIS:
               }
               // Approve: create task and send message
               const draft = approval.task_draft as Record<string, unknown>;
+
+              if (draft.message_only === true) {
+                if (approval.proposed_message) {
+                  const isGroupDest = String(approval.assignee_phone).includes("@g.us");
+                  let numberDest = isGroupDest ? approval.assignee_phone : normalizePhone(approval.assignee_phone);
+                  if (!isGroupDest && numberDest.length <= 11) numberDest = "55" + numberDest;
+                  await fetch(`${apiUrlChat}/message/sendText/${instanceChat}`, { method: "POST", headers: { "Content-Type": "application/json", apikey: apiKeyChat }, body: JSON.stringify({ number: numberDest, text: approval.proposed_message }) });
+                  await supabase.from("send_logs").insert({ contact_name: approval.assignee_name, contact_phone: approval.assignee_phone, template_name: "Mensagem direta (GIA Chat)", message_content: approval.proposed_message, status: "sent", sent_at: new Date().toISOString() });
+                }
+                await supabase.from("pending_message_approvals").update({ status: "approved", resolved_at: new Date().toISOString() }).eq("id", approval.id);
+                const numberA = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
+                await fetch(`${apiUrlChat}/message/sendText/${instanceChat}`, { method: "POST", headers: { "Content-Type": "application/json", apikey: apiKeyChat }, body: JSON.stringify({ number: numberA, text: `Mensagem enviada para *${approval.assignee_name}*.` }) });
+                await logEvent("approval-message-only-via-chat", `approval=${approval.id}`);
+                return new Response(JSON.stringify({ sent: true, message_only: true }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+              }
+
               const { data: createdTask } = await supabase.from("tasks").insert({
                 title: draft.title ?? "Tarefa sem título", description: draft.description ?? "",
                 assignee_name: approval.assignee_name, assignee_phone: approval.assignee_phone,
