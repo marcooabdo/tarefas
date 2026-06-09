@@ -608,12 +608,50 @@ Deno.serve(async (req: Request) => {
             return new Response(JSON.stringify({ renudge_sent: true, task_id: existingTaskId }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
           }
 
+          const isMessageOnly = draft.message_only === true;
           const dueDate = draft.due_date ? String(draft.due_date) : null;
           const scheduledSend = draft.scheduled_send ? String(draft.scheduled_send) : null;
           // Schedule for later if there's a scheduled_send time in the future
           const isScheduledForLater = scheduledSend && new Date(scheduledSend).getTime() > Date.now() + 60000;
           // True when there is a real deadline separate from the send time
           const hasDeadlineSeparateFromSend = isScheduledForLater && dueDate && dueDate !== scheduledSend;
+
+          // message_only: just send the message, no task creation
+          if (isMessageOnly) {
+            if (apiUrlAppr && apiKeyAppr && instanceAppr && approval.proposed_message) {
+              const isGroupMO = String(approval.assignee_phone).includes("@g.us");
+              let numberMO = isGroupMO ? approval.assignee_phone : normalizePhone(approval.assignee_phone);
+              if (!isGroupMO && numberMO.length <= 11) numberMO = "55" + numberMO;
+              await fetch(`${apiUrlAppr}/message/sendText/${instanceAppr}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json", apikey: apiKeyAppr },
+                body: JSON.stringify({ number: numberMO, text: approval.proposed_message }),
+              });
+              await supabase.from("send_logs").insert({
+                contact_name: approval.assignee_name,
+                contact_phone: approval.assignee_phone,
+                template_name: "Mensagem direta (GIA NL)",
+                message_content: approval.proposed_message,
+                status: "sent",
+                sent_at: new Date().toISOString(),
+              });
+            }
+            await supabase.from("pending_message_approvals")
+              .update({ status: "approved", resolved_at: new Date().toISOString() })
+              .eq("id", approval.id);
+            if (apiUrlAppr && apiKeyAppr && instanceAppr) {
+              const numberAppr = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
+              await fetch(`${apiUrlAppr}/message/sendText/${instanceAppr}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json", apikey: apiKeyAppr },
+                body: JSON.stringify({ number: numberAppr, text: `Mensagem enviada para *${approval.assignee_name}*.` }),
+              });
+            }
+            await logEvent("message-only-sent", `to=${approval.assignee_name}`);
+            return new Response(JSON.stringify({ sent: true, message_only: true }), {
+              headers: { ...corsHeaders, "Content-Type": "application/json" },
+            });
+          }
 
           // If scheduled for the future, store the exact message in gia_instruction for send-task-nudge to use
           // Format: ENVIAR_MENSAGEM_EXATA:[PRAZO:iso|NUDGE_HOURS:n|INSTRUCTION:text] message
@@ -1531,13 +1569,20 @@ Responda APENAS com JSON valido (sem markdown, sem crase), com estes campos:
   "recurrence": "none/daily/weekly/monthly/weekdays",
   "recurrence_interval": 1,
   "nudge": true,
+  "message_only": false,
   "instruction": "instrucao de COMO a GIA deve agir - ex: 'seja firme', 'apenas envie sem pedir resposta', 'cobre normalmente'",
-  "proposed_message": "a mensagem EXATA que a GIA deve enviar para o destinatario, escrita de forma natural e humanizada. Use emojis de forma moderada. SEMPRE inclua no final: 'Ao concluir, responda: ATOM-XXXX concluido'. Use ATOM-XXXX como placeholder. A menos que o gestor diga explicitamente para NAO pedir resposta."
+  "proposed_message": "a mensagem EXATA que a GIA deve enviar para o destinatario, escrita de forma natural e humanizada. Use emojis de forma moderada."
 }
+
+REGRA CRITICA - message_only:
+- Se o gestor diz "sem criar tarefa", "mensagem so", "so avisando", "so avisa", "apenas avise", "nao precisa cobrar", "sem cobranca", "sem acompanhamento" -> message_only=true, nudge=false
+- Quando message_only=true: NAO inclua "Ao concluir, responda: ATOM-XXXX concluido" e NAO inclua opcoes 1/2/3 na proposed_message. A mensagem deve ser APENAS o aviso/informacao, sem pedir confirmacao.
+- Quando message_only=false (padrao): INCLUA no final da proposed_message as opcoes 1/2/3 e "Ao concluir, responda: ATOM-XXXX concluido"
 
 REGRAS CRITICAS - DESTINO (PARA ONDE ENVIAR):
 - O campo "assignee" e o DESTINO da mensagem: para ONDE a mensagem sera enviada
 - REGRA MAIS IMPORTANTE: Use o nome EXATO de um contato/grupo da lista CONTATOS E GRUPOS CADASTRADOS acima. Faca fuzzy match: se o gestor diz "contabilidade", encontre o grupo que tem "contabilidade" no nome (ex: "Contabilidade Group Global"). Use o nome completo e exato como aparece na lista.
+- MUITO IMPORTANTE: So faca match se o nome do gestor REALMENTE corresponde a um grupo da lista. NAO force um match quando nao existe. Se o gestor diz "Orcamentos MOC" e NAO existe grupo com "Orcamentos" ou "MOC" na lista, use o nome EXATAMENTE como o gestor escreveu ("Orcamentos MOC"). O sistema vai buscar no WhatsApp automaticamente.
 - Se o gestor diz "envia NO GRUPO X" ou "manda no grupo X" -> assignee = nome EXATO do grupo da lista, is_group = true
 - Se o gestor diz "envia pro fulano" ou "manda pra fulano" -> assignee = nome EXATO da pessoa da lista, is_group = false
 - MUITO IMPORTANTE: Diferencie o DESTINO (onde enviar) do ASSUNTO (sobre quem/o que e a mensagem)
@@ -1561,8 +1606,8 @@ REGRAS GERAIS:
 - Se o gestor quer COBRAR algo, nudge=true e a instrucao deve refletir o tom (firme, educado, etc)
 - O proposed_message DEVE SEMPRE comecar com apresentacao da GIA. Ex: "Ola [nome]! Aqui e a GIA, Executive Advisor do Sr. ${ownerName}." — isso e OBRIGATORIO para a pessoa saber que nao e o proprio gestor escrevendo
 - Use emojis de forma natural e moderada no proposed_message
-- ANTES da instrucao de conclusao, inclua EXATAMENTE estas opcoes de status na proposed_message:\n"Por favor, confirme como esta essa tarefa:\n1️⃣ Em andamento\n2️⃣ Concluida\n3️⃣ Preciso de ajuda"
-- SEMPRE inclua no final da proposed_message: "Ao concluir, responda: ATOM-XXXX concluido" (sera substituido pelo codigo real). A menos que o gestor diga para nao pedir resposta${needsConfirmation ? "\n- REGRA ABSOLUTA: O gestor usou 'confirmacao', a linha 'Ao concluir, responda: ATOM-XXXX concluido' e OBRIGATORIA" : ""}
+- Quando message_only=false: ANTES da instrucao de conclusao, inclua EXATAMENTE estas opcoes de status na proposed_message: "Por favor, confirme como esta essa tarefa:\n1️⃣ Em andamento\n2️⃣ Concluida\n3️⃣ Preciso de ajuda" e TERMINE com "Ao concluir, responda: ATOM-XXXX concluido"
+- Quando message_only=true: NAO inclua opcoes 1/2/3, NAO inclua "ATOM-XXXX concluido". Apenas a mensagem pura${needsConfirmation ? "\n- REGRA ABSOLUTA: O gestor usou 'confirmacao', a linha 'Ao concluir, responda: ATOM-XXXX concluido' e OBRIGATORIA" : ""}
 - Se nao ha destinatario claro, deixe assignee vazio
 - Se o gestor menciona dia da semana (ex: "na segunda-feira"), calcule a data ISO correta a partir de hoje ${todayISO}
 - Se o gestor menciona horario (ex: "08:30hr"), inclua no campo correto (scheduled_send_iso ou due_date_iso conforme contexto)
@@ -1599,6 +1644,7 @@ REGRAS GERAIS:
               const instruction = String(parsed.instruction || "");
               const proposedMessage = String(parsed.proposed_message || "");
               const shouldNudge = parsed.nudge !== false && parsed.nudge !== "false";
+              const messageOnly = parsed.message_only === true || parsed.message_only === "true";
               const recurrenceRaw = String(parsed.recurrence || "none").toLowerCase();
               const recurrence = /daily|diari/.test(recurrenceRaw) ? "daily" : /weekly|seman/.test(recurrenceRaw) ? "weekly" : /monthly|mens/.test(recurrenceRaw) ? "monthly" : /weekdays|[uú]te/.test(recurrenceRaw) ? "weekdays" : "none";
               const recurrenceInterval = Math.max(1, Number(parsed.recurrence_interval) || 1);
@@ -1698,7 +1744,7 @@ REGRAS GERAIS:
                   } else if (groupCandidates.length > 1) {
                     const confirmationNeeded = await askConfirmation(
                       supabase, sNL, remoteJid, assigneeRaw, groupCandidates,
-                      { title, description, priority, due_date: dueDateNL, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: firstNudgeNL, nudge_repeat_hours: shouldNudge ? defaultRepeatHoursNL : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true, send_now: sendNowNL, scheduled_send: scheduledSendNL }
+                      { title, description, priority, due_date: dueDateNL, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: firstNudgeNL, nudge_repeat_hours: shouldNudge ? defaultRepeatHoursNL : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true, send_now: sendNowNL, scheduled_send: scheduledSendNL, message_only: messageOnly }
                     );
                     if (confirmationNeeded) {
                       await logEvent("gia-nl-awaiting-confirmation", `group="${assigneeRaw}"`);
@@ -1713,7 +1759,7 @@ REGRAS GERAIS:
                     if (allCandidates.length > 0) {
                       const confirmationNeeded = await askConfirmation(
                         supabase, sNL, remoteJid, assigneeRaw, allCandidates,
-                        { title, description, priority, due_date: dueDateNL, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: firstNudgeNL, nudge_repeat_hours: shouldNudge ? defaultRepeatHoursNL : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true, send_now: sendNowNL, scheduled_send: scheduledSendNL }
+                        { title, description, priority, due_date: dueDateNL, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: firstNudgeNL, nudge_repeat_hours: shouldNudge ? defaultRepeatHoursNL : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true, send_now: sendNowNL, scheduled_send: scheduledSendNL, message_only: messageOnly }
                       );
                       if (confirmationNeeded) {
                         await logEvent("gia-nl-awaiting-confirmation", `group="${assigneeRaw}" whatsapp`);
@@ -1762,7 +1808,7 @@ REGRAS GERAIS:
                     }));
                     const confirmationNeeded = await askConfirmation(
                       supabase, sNL, remoteJid, assigneeRaw, candidates,
-                      { title, description, priority, due_date: dueDateNL, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: firstNudgeNL, nudge_repeat_hours: shouldNudge ? defaultRepeatHoursNL : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true, send_now: sendNowNL, scheduled_send: scheduledSendNL }
+                      { title, description, priority, due_date: dueDateNL, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: firstNudgeNL, nudge_repeat_hours: shouldNudge ? defaultRepeatHoursNL : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true, send_now: sendNowNL, scheduled_send: scheduledSendNL, message_only: messageOnly }
                     );
                     if (confirmationNeeded) {
                       await logEvent("gia-nl-awaiting-confirmation", `assignee="${assigneeRaw}"`);
@@ -1778,7 +1824,7 @@ REGRAS GERAIS:
                   if (whatsappCandidates.length > 0) {
                     const confirmationNeeded = await askConfirmation(
                       supabase, sNL, remoteJid, assigneeRaw, whatsappCandidates,
-                      { title, description, priority, due_date: dueDateNL, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: firstNudgeNL, nudge_repeat_hours: shouldNudge ? defaultRepeatHoursNL : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true, send_now: sendNowNL, scheduled_send: scheduledSendNL }
+                      { title, description, priority, due_date: dueDateNL, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: firstNudgeNL, nudge_repeat_hours: shouldNudge ? defaultRepeatHoursNL : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true, send_now: sendNowNL, scheduled_send: scheduledSendNL, message_only: messageOnly }
                     );
                     if (confirmationNeeded) {
                       await logEvent("gia-nl-awaiting-confirmation", `assignee="${assigneeRaw}" whatsapp`);
@@ -1877,6 +1923,7 @@ REGRAS GERAIS:
                   group_name: groupName,
                   send_now: sendNowNL,
                   scheduled_send: scheduledSendNL,
+                  message_only: messageOnly,
                 };
 
                 // Cancel stale pending approvals before creating a new one
@@ -1918,9 +1965,10 @@ REGRAS GERAIS:
                   if (shouldNudge && dueDateNL) lines.push(`Cobranca apos prazo: a cada ${defaultRepeatHoursNL}h`);
                   if (recurrence !== "none") lines.push(`Recorrencia: ${recurrence}${recurrenceInterval > 1 ? ` x${recurrenceInterval}` : ""}`);
                   const infoBlock = lines.map(l => `// ${l}`).join("\n");
+                  const previewMsg = proposedMessage.replace(/ATOM-XXXX/g, "(codigo gerado automaticamente)");
                   const approvalMsg =
                     `Contato confirmado: *${assigneeName}*\n\n` +
-                    `Vou enviar:\n---\n${proposedMessage}\n---\n\n` +
+                    `Vou enviar:\n---\n${previewMsg}\n---\n\n` +
                     infoBlock +
                     `\n\nPosso mandar? Responda *ok* para aprovar ou *nao* para cancelar.`;
                   await fetch(`${apiUrlNL}/message/sendText/${instanceNL}`, {
