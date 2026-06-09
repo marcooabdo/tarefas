@@ -1561,6 +1561,7 @@ REGRAS GERAIS:
 - Se o gestor quer COBRAR algo, nudge=true e a instrucao deve refletir o tom (firme, educado, etc)
 - O proposed_message DEVE SEMPRE comecar com apresentacao da GIA. Ex: "Ola [nome]! Aqui e a GIA, Executive Advisor do Sr. ${ownerName}." — isso e OBRIGATORIO para a pessoa saber que nao e o proprio gestor escrevendo
 - Use emojis de forma natural e moderada no proposed_message
+- ANTES da instrucao de conclusao, inclua EXATAMENTE estas opcoes de status na proposed_message:\n"Por favor, confirme como esta essa tarefa:\n1️⃣ Em andamento\n2️⃣ Concluida\n3️⃣ Preciso de ajuda"
 - SEMPRE inclua no final da proposed_message: "Ao concluir, responda: ATOM-XXXX concluido" (sera substituido pelo codigo real). A menos que o gestor diga para nao pedir resposta${needsConfirmation ? "\n- REGRA ABSOLUTA: O gestor usou 'confirmacao', a linha 'Ao concluir, responda: ATOM-XXXX concluido' e OBRIGATORIA" : ""}
 - Se nao ha destinatario claro, deixe assignee vazio
 - Se o gestor menciona dia da semana (ex: "na segunda-feira"), calcule a data ISO correta a partir de hoje ${todayISO}
@@ -2568,8 +2569,9 @@ Se nao e uma acao especial, apenas responda normalmente como assistente intelige
       /\b(conclu[ií]d[oa]?|finalizado|feito|pronto|done|terminado|andamento|fazendo|executando|bloquead[oa]?|travad[oa]?|impedid[oa]?|enviado|enviada|sim|nao|não|ok)\b/i.test(text);
 
     // Map short replies 1/2/3 to intents when nudged recently
-    if (intent === "unknown" && nudgedRecently && /^\s*1\s*$/.test(text)) intent = "completed";
-    if (intent === "unknown" && nudgedRecently && /^\s*2\s*$/.test(text)) intent = "in_progress";
+    // Standard GIA options: 1=Em andamento, 2=Concluido/Pronto, 3=Preciso de ajuda
+    if (intent === "unknown" && nudgedRecently && /^\s*1\s*$/.test(text)) intent = "in_progress";
+    if (intent === "unknown" && nudgedRecently && /^\s*2\s*$/.test(text)) intent = "completed";
     if (intent === "unknown" && nudgedRecently && /^\s*3\s*$/.test(text)) intent = "blocked";
 
     // If intent is unknown and no task code was explicitly referenced, check if it's a valid response to a nudge

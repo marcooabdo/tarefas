@@ -177,9 +177,10 @@ Deno.serve(async (req: Request) => {
             `- Informe o prazo REAL da tarefa (${dueLabel}). NÃO invente prazos.\n` +
             `- Se o prazo é futuro, a data exata é: ${task.due_date ? new Date(new Date(task.due_date).getTime() - 3*60*60*1000).toISOString().slice(0,10) : "sem prazo"}\n` +
             `- Use emojis de forma natural e moderada.\n` +
-            `- A mensagem DEVE incluir no final EXATAMENTE esta instrução de conclusão:\n` +
-            `"Ao concluir, responda: ${task.task_code ?? ""} concluído"\n\n` +
-            `Não inclua nada além da mensagem final.`;
+            `- ANTES da instrucao de conclusao, inclua EXATAMENTE estas opcoes de status (use emojis de numero):\n` +
+            `"Por favor, confirme como esta essa tarefa:\n1️⃣ Em andamento\n2️⃣ Concluida\n3️⃣ Preciso de ajuda"\n` +
+            `- A mensagem DEVE terminar com EXATAMENTE: "Ao concluir, responda: ${task.task_code ?? ""} concluido"\n\n` +
+            `Nao inclua nada alem da mensagem final.`;
         }
         const aiRes = await fetch("https://api.openai.com/v1/chat/completions", {
           method: "POST",
