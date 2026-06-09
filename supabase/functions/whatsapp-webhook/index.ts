@@ -1963,6 +1963,60 @@ REGRAS GERAIS:
         const ownerNameChat = (rawOwnerChat && rawOwnerChat.toLowerCase() !== "eu") ? rawOwnerChat : "Marco Abdo";
 
         if (openaiKeyChat && apiUrlChat && apiKeyChat && instanceChat) {
+          // Check for pending approvals FIRST - handle ok/nao before GPT
+          const approvalText = text.trim().toLowerCase();
+          const isQuickApprove = /^(ok|sim|manda|envia|aprovo|pode|pode mandar|vai|manda ver|show|beleza|perfeito|bora|blz|s)\s*$/i.test(approvalText);
+          const isQuickReject = /^(n[aã]o|cancela|nao|nope|n|nao manda|cancela|para|deixa|esquece)\s*$/i.test(approvalText);
+          if (isQuickApprove || isQuickReject) {
+            const { data: chatPendingApproval } = await supabase
+              .from("pending_message_approvals")
+              .select("*")
+              .eq("owner_jid", remoteJid)
+              .eq("status", "pending")
+              .order("created_at", { ascending: false })
+              .limit(1);
+            if (chatPendingApproval && chatPendingApproval.length > 0) {
+              const approval = chatPendingApproval[0];
+              if (isQuickReject) {
+                await supabase.from("pending_message_approvals").update({ status: "rejected", resolved_at: new Date().toISOString() }).eq("id", approval.id);
+                const numberR = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
+                await fetch(`${apiUrlChat}/message/sendText/${instanceChat}`, { method: "POST", headers: { "Content-Type": "application/json", apikey: apiKeyChat }, body: JSON.stringify({ number: numberR, text: "Cancelado. Mensagem nao enviada." }) });
+                await logEvent("approval-rejected-via-chat", `approval=${approval.id}`);
+                return new Response(JSON.stringify({ approval_rejected: true }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+              }
+              // Approve: create task and send message
+              const draft = approval.task_draft as Record<string, unknown>;
+              const { data: createdTask } = await supabase.from("tasks").insert({
+                title: draft.title ?? "Tarefa sem título", description: draft.description ?? "",
+                assignee_name: approval.assignee_name, assignee_phone: approval.assignee_phone,
+                group_name: draft.group_name ?? "", status: "pending", priority: draft.priority ?? "medium",
+                due_date: draft.due_date ?? null, recurrence: draft.recurrence ?? "none",
+                recurrence_interval: draft.recurrence_interval ?? 1, first_nudge_at: draft.first_nudge_at ?? null,
+                nudge_repeat_hours: draft.nudge_repeat_hours ?? 0, nudge_active: draft.nudge_active ?? false,
+                gia_instruction: draft.gia_instruction ?? "",
+              }).select().maybeSingle();
+              if (approval.proposed_message) {
+                let msgToSend = String(approval.proposed_message);
+                if (createdTask?.task_code) msgToSend = msgToSend.replace(/ATOM-XXXX/g, createdTask.task_code);
+                const isGroupDest = String(approval.assignee_phone).includes("@g.us");
+                let numberDest = isGroupDest ? approval.assignee_phone : normalizePhone(approval.assignee_phone);
+                if (!isGroupDest && numberDest.length <= 11) numberDest = "55" + numberDest;
+                await fetch(`${apiUrlChat}/message/sendText/${instanceChat}`, { method: "POST", headers: { "Content-Type": "application/json", apikey: apiKeyChat }, body: JSON.stringify({ number: numberDest, text: msgToSend }) });
+                if (createdTask) {
+                  const exactInstr = `ENVIAR_MENSAGEM_EXATA: ${msgToSend}`;
+                  await supabase.from("tasks").update({ gia_instruction: exactInstr, last_ai_nudge: new Date().toISOString(), ai_interventions: 1 }).eq("id", createdTask.id);
+                }
+                await supabase.from("send_logs").insert({ contact_name: approval.assignee_name, contact_phone: approval.assignee_phone, template_name: "Mensagem aprovada (GIA Chat)", message_content: msgToSend, status: "sent", sent_at: new Date().toISOString() });
+              }
+              await supabase.from("pending_message_approvals").update({ status: "approved", resolved_at: new Date().toISOString(), task_id: createdTask?.id ?? null }).eq("id", approval.id);
+              const numberA = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
+              const code = createdTask?.task_code ? ` ${createdTask.task_code}` : "";
+              await fetch(`${apiUrlChat}/message/sendText/${instanceChat}`, { method: "POST", headers: { "Content-Type": "application/json", apikey: apiKeyChat }, body: JSON.stringify({ number: numberA, text: `Mensagem enviada para *${approval.assignee_name}*${code}. Estou acompanhando.` }) });
+              await logEvent("approval-approved-via-chat", `approval=${approval.id}`);
+              return new Response(JSON.stringify({ approved: true, task_id: createdTask?.id }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+            }
+          }
+
           const [
             { data: recentTasks },
             { data: pendingApprovals },
@@ -2058,13 +2112,18 @@ ${schedulesList || "(nenhum agendamento)"}
 ═══ ULTIMOS ENVIOS ═══
 ${logsList || "(nenhum envio recente)"}
 
+IMPORTANTE - HISTORICO DE CONVERSA:
+Voce tem acesso ao historico recente da conversa (ultimos 30 minutos). Use-o para entender o CONTEXTO de mensagens curtas como "8", "esse", "ok", "sim", "manda pro 3", etc. Se na conversa anterior voce listou opcoes numeradas, e o gestor responde com um numero, ENTENDA que ele esta selecionando aquela opcao e EXECUTE a acao correspondente.
+
 COMPORTAMENTO:
 - Voce TEM ACESSO a todos os dados acima. Quando o gestor perguntar sobre contatos, grupos, tarefas, envios, agendamentos, CONSULTE os dados e responda com informacoes reais.
 - Se o gestor perguntar "quais grupos C-LEVEL voce esta?", liste os grupos com nome C-LEVEL dos CONTATOS SALVOS (is_group=true).
 - Se perguntar "quem e responsavel pela tarefa X?", busque nas tarefas.
 - Se perguntar "o que foi enviado hoje?", busque nos ultimos envios.
 - Se perguntar sobre uma pessoa, busque nos contatos.
-- Seja CONVERSACIONAL: faca perguntas de volta, sugira acoes, antecipe necessidades.
+- Seja CONVERSACIONAL mas ORIENTADA A ACAO: quando o gestor pedir algo, EXECUTE usando as acoes especiais. Nao fique so perguntando - se tem informacao suficiente, age.
+- Quando o gestor der um comando claro (ex: "envia pro grupo X tal mensagem"), use IMEDIATAMENTE a acao create_task. NAO pergunte "qual grupo?" se ele ja disse qual.
+- Se o gestor responde um NUMERO apos voce ter listado opcoes, EXECUTE a acao com a opcao selecionada. Ex: voce listou 15 grupos, ele respondeu "8" = use o grupo #8 da lista.
 - Seja concisa mas completa. Use listas quando fizer sentido.
 - SIGA RIGOROSAMENTE as instrucoes do system prompt acima (emojis, tom, formato, etc)
 - Se o gestor pedir algo que voce nao consegue resolver com os dados disponiveis, explique o que voce sabe e sugira alternativas.
@@ -2085,6 +2144,24 @@ Inclui: criar tarefa, enviar mensagem, cobrar, lembrete, tarefa recorrente, broa
 Se nao e uma acao especial, apenas responda normalmente como assistente inteligente.`;
 
           try {
+            // Load conversation history (last 10 messages within 30 min)
+            const histCutoff = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+            const { data: histRows } = await supabase
+              .from("gia_conversation_history")
+              .select("role, content, created_at")
+              .eq("owner_jid", remoteJid)
+              .gte("created_at", histCutoff)
+              .order("created_at", { ascending: true })
+              .limit(10);
+            const histMessages = (histRows ?? []).map(h => ({ role: h.role as "user" | "assistant", content: h.content }));
+
+            // Save current user message to history
+            await supabase.from("gia_conversation_history").insert({ owner_jid: remoteJid, role: "user", content: text });
+
+            // Clean up old history (older than 1 hour)
+            const cleanupCutoff = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+            await supabase.from("gia_conversation_history").delete().lt("created_at", cleanupCutoff);
+
             const aiResChat = await fetch("https://api.openai.com/v1/chat/completions", {
               method: "POST",
               headers: { "Content-Type": "application/json", Authorization: `Bearer ${openaiKeyChat}` },
@@ -2093,6 +2170,7 @@ Se nao e uma acao especial, apenas responda normalmente como assistente intelige
                 temperature: 0.5,
                 messages: [
                   { role: "system", content: chatPrompt },
+                  ...histMessages,
                   { role: "user", content: text },
                 ],
               }),
@@ -2248,6 +2326,9 @@ Se nao e uma acao especial, apenas responda normalmente como assistente intelige
               }
 
               if (reply) {
+                // Save assistant reply to conversation history
+                await supabase.from("gia_conversation_history").insert({ owner_jid: remoteJid, role: "assistant", content: reply });
+
                 const numberReply = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
                 await fetch(`${apiUrlChat}/message/sendText/${instanceChat}`, {
                   method: "POST",
