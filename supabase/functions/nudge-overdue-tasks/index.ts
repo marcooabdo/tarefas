@@ -63,13 +63,27 @@ Deno.serve(async (req: Request) => {
     const now = Date.now();
     const nowIso = new Date(now).toISOString();
 
-    const { data: tasks } = await supabase
+    // Fetch tasks that need nudging:
+    // - Non-recurring: only if NOT completed
+    // - Recurring: always (even if completed, they reincide)
+    const { data: tasksNonCompleted } = await supabase
       .from("tasks")
       .select("*")
       .neq("status", "completed")
       .eq("nudge_active", true)
       .not("first_nudge_at", "is", null)
       .lte("first_nudge_at", nowIso);
+
+    const { data: tasksRecurring } = await supabase
+      .from("tasks")
+      .select("*")
+      .eq("status", "completed")
+      .eq("nudge_active", true)
+      .neq("recurrence", "none")
+      .not("first_nudge_at", "is", null)
+      .lte("first_nudge_at", nowIso);
+
+    const tasks = [...(tasksNonCompleted ?? []), ...(tasksRecurring ?? [])];
 
     const maxNudges = Number(settings["default_max_nudges"] || "0") || 0;
 
@@ -249,14 +263,14 @@ Deno.serve(async (req: Request) => {
 
         if (ok) {
           if (isRecurring) {
-            // Recurring task: reschedule to next occurrence instead of continuing nudges
+            // Recurring task: reschedule to next occurrence, always stays active
             const nextDue = nextDueDate(task.due_date ?? task.first_nudge_at, recurrence, recurrenceInterval);
             await supabase
               .from("tasks")
               .update({
                 ai_interventions: (task.ai_interventions ?? 0) + 1,
                 last_ai_nudge: new Date().toISOString(),
-                status: "pending",
+                status: "awaiting_response",
                 due_date: nextDue,
                 first_nudge_at: nextDue,
                 nudge_active: true,
@@ -268,7 +282,7 @@ Deno.serve(async (req: Request) => {
               .update({
                 ai_interventions: (task.ai_interventions ?? 0) + 1,
                 last_ai_nudge: new Date().toISOString(),
-                status: task.status === "completed" ? "completed" : "awaiting_response",
+                status: "awaiting_response",
                 nudge_active: !isSingle,
               })
               .eq("id", task.id);

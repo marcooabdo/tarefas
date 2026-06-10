@@ -2443,7 +2443,10 @@ Se nao e uma acao especial, apenas responda normalmente como assistente intelige
                       const statusUpdate: Record<string, unknown> = { status: newStatus };
                       if (newStatus === "completed") {
                         statusUpdate.completed_at = new Date().toISOString();
-                        statusUpdate.nudge_active = false;
+                        // For recurring tasks, keep nudge_active so they fire again
+                        const { data: taskFull } = await supabase.from("tasks").select("recurrence").eq("id", targetTask.id).maybeSingle();
+                        const isRecurringTask = taskFull?.recurrence && taskFull.recurrence !== "none";
+                        if (!isRecurringTask) statusUpdate.nudge_active = false;
                       } else if (newStatus === "cancelled") {
                         statusUpdate.nudge_active = false;
                       }
@@ -2867,17 +2870,21 @@ Se nao e uma acao especial, apenas responda normalmente como assistente intelige
 
     if (intent === "completed") {
       if (recurrence && recurrence !== "none") {
-        updates.status = "pending";
-        updates.completed_at = null;
+        const next = nextDueDate(match.due_date as string | null, recurrence, recurrenceInterval);
+        updates.status = "completed";
+        updates.completed_at = new Date().toISOString();
         updates.ai_interventions = 0;
         updates.last_ai_nudge = null;
-        const next = nextDueDate(match.due_date as string | null, recurrence, recurrenceInterval);
-        if (next) updates.due_date = next;
+        updates.nudge_active = true;
+        if (next) {
+          updates.due_date = next;
+          updates.first_nudge_at = next;
+        }
         recurred = true;
       } else {
         updates.status = "completed";
         updates.completed_at = new Date().toISOString();
-        if (giaInstr) updates.nudge_active = false;
+        updates.nudge_active = false;
       }
     } else if (intent === "in_progress") {
       updates.status = "in_progress";

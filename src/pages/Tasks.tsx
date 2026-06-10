@@ -61,7 +61,7 @@ function defaultFirstNudge(): string {
 const emptyDraft: Draft = {
   title: '',
   description: '',
-  status: 'pending',
+  status: 'awaiting_response',
   priority: 'medium',
   due_date: '',
   recipient_ids: [],
@@ -163,10 +163,16 @@ export function Tasks() {
   const selectedRecipients = contacts.filter((c) => draft.recipient_ids.includes(c.id));
 
   const grouped = useMemo(() => {
-    const map: Record<TaskStatus, Task[]> = {
-      pending: [], in_progress: [], awaiting_response: [], completed: [],
+    const map: Record<string, Task[]> = {
+      awaiting_response: [], completed: [],
     };
-    tasks.forEach((t) => { map[t.status]?.push(t); });
+    tasks.forEach((t) => {
+      if (t.status === 'completed') {
+        map.completed.push(t);
+      } else {
+        map.awaiting_response.push(t);
+      }
+    });
     return map;
   }, [tasks]);
 
@@ -251,13 +257,6 @@ export function Tasks() {
     setEditingId(null);
     setDraft(emptyDraft);
     load();
-  }
-
-  async function moveTask(id: string, status: TaskStatus) {
-    const updates: Partial<Task> = { status };
-    if (status === 'completed') updates.completed_at = new Date().toISOString();
-    await supabase.from('tasks').update(updates).eq('id', id);
-    setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, ...updates } : t)));
   }
 
   async function forceAiNudge(t: Task) {
@@ -365,7 +364,7 @@ export function Tasks() {
         <div style={{ display: 'flex', gap: '6px' }}>
           <button
             onClick={() => forceAiNudge(t)}
-            disabled={nudgingId === t.id || t.status === 'completed'}
+            disabled={nudgingId === t.id}
             className="neon-btn"
             style={{ flex: 1, padding: '8px 10px', fontSize: '11.5px', justifyContent: 'center' }}
           >
@@ -391,26 +390,6 @@ export function Tasks() {
             <Trash2 size={13} />
           </button>
         </div>
-
-        <select
-          value={t.status}
-          onChange={(e) => moveTask(t.id, e.target.value as TaskStatus)}
-          style={{
-            background: 'rgba(255,255,255,0.04)',
-            color: '#c6cdda',
-            border: '1px solid rgba(255,255,255,0.1)',
-            borderRadius: '8px',
-            padding: '6px 8px',
-            fontSize: '11px',
-            cursor: 'pointer',
-          }}
-        >
-          {TASK_COLUMNS.map((c) => (
-            <option key={c.id} value={c.id} style={{ background: '#0e1016' }}>
-              Mover para: {c.label}
-            </option>
-          ))}
-        </select>
       </div>
     );
   }
@@ -469,7 +448,7 @@ export function Tasks() {
           className="kanban-wrapper"
           style={{
             display: 'grid',
-            gridTemplateColumns: 'repeat(4, minmax(260px, 1fr))',
+            gridTemplateColumns: 'repeat(2, minmax(350px, 1fr))',
             gap: '16px',
             overflowX: 'auto',
           }}
@@ -504,7 +483,7 @@ export function Tasks() {
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
               <tr style={{ background: 'rgba(255,255,255,0.03)' }}>
-                {['Tarefa', 'Responsável', 'WhatsApp', 'Prazo', 'Status', 'IA', 'Ações'].map((h) => (
+                {['Tarefa', 'Responsável', 'WhatsApp', 'Prazo', 'Recorrência', 'IA', 'Ações'].map((h) => (
                   <th key={h} style={{ padding: '14px 16px', textAlign: 'left', fontSize: '11px', color: '#6b7384', fontWeight: 600, letterSpacing: '0.6px', textTransform: 'uppercase' }}>{h}</th>
                 ))}
               </tr>
@@ -525,16 +504,21 @@ export function Tasks() {
                   <td style={{ padding: '14px 16px', fontSize: '12px', color: '#9aa3b2', fontFamily: 'monospace' }}>{t.assignee_phone}</td>
                   <td style={{ padding: '14px 16px', fontSize: '12px', color: isOverdue(t) ? '#ff4d79' : '#9aa3b2' }}>{formatDue(t.due_date)}</td>
                   <td style={{ padding: '14px 16px' }}>
-                    <span className="chip" style={{ background: 'rgba(255,255,255,0.05)', color: '#c6cdda', border: '1px solid rgba(255,255,255,0.1)' }}>
-                      {TASK_COLUMNS.find((c) => c.id === t.status)?.label}
-                    </span>
+                    {t.recurrence && t.recurrence !== 'none' ? (
+                      <span className="chip" style={{ background: 'rgba(16,245,155,0.1)', color: '#10f59b', border: '1px solid rgba(16,245,155,0.3)' }}>
+                        <Repeat size={10} />
+                        {RECURRENCE_LABEL[t.recurrence]}
+                      </span>
+                    ) : (
+                      <span style={{ fontSize: '11px', color: '#6b7384' }}>Única</span>
+                    )}
                   </td>
                   <td style={{ padding: '14px 16px', fontSize: '12px', color: '#b347ff', fontWeight: 600 }}>{t.ai_interventions}x</td>
                   <td style={{ padding: '14px 16px' }}>
                     <div style={{ display: 'flex', gap: '6px' }}>
                       <button
                         onClick={() => forceAiNudge(t)}
-                        disabled={nudgingId === t.id || t.status === 'completed'}
+                        disabled={nudgingId === t.id}
                         className="neon-btn"
                         style={{ padding: '6px 10px', fontSize: '11px' }}
                       >
@@ -901,18 +885,7 @@ export function Tasks() {
               </div>
               )}
 
-              <div className="form-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px' }}>
-                <Field label="Status">
-                  <select
-                    className="nx-input"
-                    value={draft.status}
-                    onChange={(e) => setDraft({ ...draft, status: e.target.value as TaskStatus })}
-                  >
-                    {TASK_COLUMNS.map((c) => (
-                      <option key={c.id} value={c.id} style={{ background: '#0e1016' }}>{c.label}</option>
-                    ))}
-                  </select>
-                </Field>
+              <div className="form-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
                 <Field label="Prioridade">
                   <select
                     className="nx-input"

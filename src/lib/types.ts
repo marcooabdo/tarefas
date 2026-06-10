@@ -93,9 +93,7 @@ export interface Task {
 }
 
 export const TASK_COLUMNS: { id: TaskStatus; label: string; accent: string }[] = [
-  { id: 'pending', label: 'Pendente', accent: '#6b7280' },
-  { id: 'in_progress', label: 'Em Execução', accent: '#00e5ff' },
-  { id: 'awaiting_response', label: 'Aguardando Resposta (IA Cobrando)', accent: '#b347ff' },
+  { id: 'awaiting_response', label: 'IA Cobrando', accent: '#b347ff' },
   { id: 'completed', label: 'Concluído', accent: '#10f59b' },
 ];
 
