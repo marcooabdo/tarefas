@@ -164,11 +164,13 @@ export function Tasks() {
 
   const grouped = useMemo(() => {
     const map: Record<string, Task[]> = {
-      awaiting_response: [], completed: [],
+      awaiting_response: [], recurring: [], completed: [],
     };
     tasks.forEach((t) => {
-      if (t.status === 'completed') {
+      if (t.status === 'completed' && (!t.recurrence || t.recurrence === 'none')) {
         map.completed.push(t);
+      } else if (t.recurrence && t.recurrence !== 'none') {
+        map.recurring.push(t);
       } else {
         map.awaiting_response.push(t);
       }
@@ -448,7 +450,7 @@ export function Tasks() {
           className="kanban-wrapper"
           style={{
             display: 'grid',
-            gridTemplateColumns: 'repeat(2, minmax(350px, 1fr))',
+            gridTemplateColumns: 'repeat(3, minmax(300px, 1fr))',
             gap: '16px',
             overflowX: 'auto',
           }}

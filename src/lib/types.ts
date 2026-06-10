@@ -92,8 +92,9 @@ export interface Task {
   updated_at: string;
 }
 
-export const TASK_COLUMNS: { id: TaskStatus; label: string; accent: string }[] = [
+export const TASK_COLUMNS: { id: string; label: string; accent: string }[] = [
   { id: 'awaiting_response', label: 'IA Cobrando', accent: '#b347ff' },
+  { id: 'recurring', label: 'Reincidentes', accent: '#ff9f0a' },
   { id: 'completed', label: 'Concluído', accent: '#10f59b' },
 ];
 
