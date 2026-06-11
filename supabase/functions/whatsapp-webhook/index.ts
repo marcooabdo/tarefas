@@ -301,6 +301,7 @@ Deno.serve(async (req: Request) => {
     payload?.remoteJid ??
     "";
   const fromMe: boolean = Boolean(data?.key?.fromMe ?? data?.message?.key?.fromMe ?? payload?.fromMe);
+  const internalReinvoke: boolean = Boolean(payload?.internal_reinvoke);
   const msg = data?.message ?? data?.messages?.[0]?.message ?? data ?? {};
   const buttonId: string =
     msg?.buttonsResponseMessage?.selectedButtonId ??
@@ -512,7 +513,7 @@ Deno.serve(async (req: Request) => {
 
     // Skip messages that are GIA's own responses (sent by the bot itself via Evolution API)
     const isGiaOwnMessage = /Posso mandar\? Responda|Entendi!? Vou enviar|Mensagem enviada para|Cancelado\. Mensagem nao|Nao entendi a correcao|Encontrei estes contatos|Agendado\s*ATOM-|Aqui (é|e) a GIA|Pronto!? .*enviada|Reagendado\s*ATOM-|Cobran.a enviada|Executive Advisor do Sr\./i.test(text);
-    if (isGiaOwnMessage && fromMe) {
+    if (isGiaOwnMessage && fromMe && !internalReinvoke) {
       await logEvent("ignored-gia-own-message", text.slice(0, 60));
       return new Response(JSON.stringify({ ignored: true, reason: "gia_own_message" }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -2404,6 +2405,7 @@ Se nao e uma acao especial, apenas responda normalmente como assistente intelige
                       headers: { "Content-Type": "application/json", Authorization: `Bearer ${serviceKey}` },
                       body: JSON.stringify({
                         event: "messages.upsert",
+                        internal_reinvoke: true,
                         data: {
                           key: { fromMe: true, remoteJid },
                           message: { conversation: `GIA ${command}` },
@@ -2412,15 +2414,13 @@ Se nao e uma acao especial, apenas responda normalmente como assistente intelige
                         instance: instanceChat,
                       }),
                     });
-                    reply = reply.includes("|||") ? reply.split("|||").pop()!.trim() : "";
-                    // Don't send a reply here - the NL pipeline will handle communication
-                    if (!reply) {
-                      await logEvent("gia-chat-create-task", command.slice(0, 60));
-                      return new Response(
-                        JSON.stringify({ chat_reply: true, delegated_to_nl: true }),
-                        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-                      );
-                    }
+                    // Always suppress the GPT reply - the NL pipeline handles communication
+                    // (sends approval request or direct confirmation with real task code)
+                    await logEvent("gia-chat-create-task", command.slice(0, 60));
+                    return new Response(
+                      JSON.stringify({ chat_reply: true, delegated_to_nl: true }),
+                      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+                    );
                   }
                 } catch { /* JSON parse failed */ }
               }
