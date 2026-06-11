@@ -152,11 +152,19 @@ Deno.serve(async (req: Request) => {
 
     const descriptionText = task.description ? `\nDetalhes: ${task.description}` : "";
 
+    const recurrence = String(task.recurrence ?? "none");
+    const isRecurring = recurrence !== "none";
+
     let fallbackMessage: string;
     if (isSendOnly) {
       fallbackMessage =
         `Olá ${task.assignee_name}! Aqui é a GIA, assistente do Sr. Marco Abdo.\n\n` +
         `${task.title}${descriptionText ? "\n" + task.description : ""}`;
+    } else if (isRecurring) {
+      fallbackMessage =
+        `Olá ${task.assignee_name}! Aqui é a GIA, Executive Advisor do Sr. Marco Abdo.\n\n` +
+        `Preciso de uma atualização sobre: *"${task.title}"*${descriptionText}\n` +
+        `Prazo: ${dueLabel}.`;
     } else {
       const taskRef = task.task_code ?? "";
       fallbackMessage =
@@ -184,6 +192,26 @@ Deno.serve(async (req: Request) => {
             `- Seja cordial e natural como uma assistente executiva.\n` +
             `- Use emojis de forma moderada.\n` +
             `- Não inclua referência de tarefa. Seja breve e humana.`;
+        } else if (isRecurring) {
+          userBrief =
+            `Gere a mensagem de cobrança da seguinte tarefa RECORRENTE para envio no WhatsApp.\n` +
+            `Responsável: ${task.assignee_name}\n` +
+            `Tarefa: ${task.title}\n` +
+            `Descrição completa: ${task.description || "Nenhuma descrição adicional"}\n` +
+            `Prazo: ${dueLabel}\n` +
+            `Código da tarefa: ${task.task_code ?? "—"}\n` +
+            (giaInstruction ? `\nInstrução adicional do gestor: ${giaInstruction}\n` : "") +
+            `\nINSTRUÇÕES OBRIGATÓRIAS:\n` +
+            `- OBRIGATÓRIO: A mensagem DEVE começar com uma apresentação. Ex: "Olá [nome]! Aqui é a GIA, Executive Advisor do Sr. ${ownerNameNudge}."\n` +
+            `- SIGA RIGOROSAMENTE todas as instruções do system prompt (emojis, tom, formato, apresentação)\n` +
+            `- Explique claramente para a pessoa O QUE é a tarefa usando o título e a descrição fornecidos.\n` +
+            `- Contextualize o que precisa ser feito de forma objetiva para que a pessoa entenda exatamente do que se trata.\n` +
+            `- Informe o prazo REAL da tarefa (${dueLabel}). NÃO invente prazos.\n` +
+            `- Se o prazo é futuro, a data exata é: ${task.due_date ? new Date(new Date(task.due_date).getTime() - 3*60*60*1000).toISOString().slice(0,10) : "sem prazo"}\n` +
+            `- Use emojis de forma natural e moderada.\n` +
+            `- Esta é uma tarefa RECORRENTE. NÃO inclua opções de status numeradas (1, 2, 3). NÃO peça para confirmar conclusão. NÃO inclua "Ao concluir, responda...".\n` +
+            `- Apenas cobre a atualização e peça o retorno de forma natural, sem menu de opções.\n\n` +
+            `Nao inclua nada alem da mensagem final.`;
         } else {
           userBrief =
             `Gere a mensagem de cobrança da seguinte tarefa para envio no WhatsApp.\n` +
@@ -261,9 +289,7 @@ Deno.serve(async (req: Request) => {
     });
 
     if (status === "sent") {
-      const recurrence = String(task.recurrence ?? "none");
       const recurrenceInterval = Number(task.recurrence_interval ?? 1) || 1;
-      const isRecurring = recurrence !== "none";
 
       if (isRecurring && !isSendOnly) {
         const nextDue = nextDueDate(task.due_date ?? task.first_nudge_at, recurrence, recurrenceInterval);
