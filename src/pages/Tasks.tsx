@@ -281,7 +281,11 @@ export function Tasks() {
       alert(`Erro de rede: ${e?.message ?? 'desconhecido'}`);
     } finally {
       setNudgingId(null);
-      load();
+      setTasks((prev) =>
+        prev.map((task) =>
+          task.id === t.id ? { ...task, ai_interventions: task.ai_interventions + 1 } : task
+        )
+      );
     }
   }
 
