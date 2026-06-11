@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Plus, Phone, Users as Users2, Clock, Zap, CircleAlert as AlertCircle, Flame, Trash2, Send, LayoutGrid, List as ListIcon, X, Search, Check, Repeat, Pencil } from 'lucide-react';
+import { Plus, Phone, Users as Users2, Clock, Zap, CircleAlert as AlertCircle, Flame, Trash2, Send, LayoutGrid, List as ListIcon, X, Search, Check, Repeat, Pencil, ArrowLeft, ArrowRight } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import type { Task, TaskPriority, TaskStatus, TaskRecurrence, Contact } from '../lib/types';
 import { TASK_COLUMNS, RECURRENCE_OPTIONS } from '../lib/types';
@@ -285,6 +285,45 @@ export function Tasks() {
     }
   }
 
+  function getColumnId(t: Task): string {
+    if (t.status === 'completed' && (!t.recurrence || t.recurrence === 'none')) return 'completed';
+    if (t.recurrence && t.recurrence !== 'none') return 'recurring';
+    return 'awaiting_response';
+  }
+
+  async function moveToColumn(t: Task, targetCol: string) {
+    const currentCol = getColumnId(t);
+    if (currentCol === targetCol) return;
+    const updates: Record<string, unknown> = {};
+    if (targetCol === 'completed') {
+      updates.status = 'completed';
+      updates.completed_at = new Date().toISOString();
+      if (t.recurrence && t.recurrence !== 'none') {
+        updates.recurrence = 'none';
+        updates.recurrence_interval = 1;
+      }
+      updates.nudge_active = false;
+    } else if (targetCol === 'recurring') {
+      updates.status = t.status === 'completed' ? 'awaiting_response' : t.status;
+      updates.completed_at = null;
+      if (!t.recurrence || t.recurrence === 'none') {
+        updates.recurrence = 'daily';
+        updates.recurrence_interval = 1;
+      }
+      updates.nudge_active = true;
+    } else {
+      updates.status = 'awaiting_response';
+      updates.completed_at = null;
+      if (t.recurrence && t.recurrence !== 'none') {
+        updates.recurrence = 'none';
+        updates.recurrence_interval = 1;
+      }
+      updates.nudge_active = true;
+    }
+    await supabase.from('tasks').update(updates).eq('id', t.id);
+    setTasks((prev) => prev.map((task) => (task.id === t.id ? { ...task, ...updates } as Task : task)));
+  }
+
   async function removeTask(id: string) {
     const { error } = await supabase.from('tasks').delete().eq('id', id);
     if (error) {
@@ -293,6 +332,8 @@ export function Tasks() {
     }
     setTasks((prev) => prev.filter((t) => t.id !== id));
   }
+
+  const colOrder = TASK_COLUMNS.map((c) => c.id);
 
   function TaskCard({ t }: { t: Task }) {
     const PIcon = priorityIcon[t.priority];
@@ -392,6 +433,61 @@ export function Tasks() {
             <Trash2 size={13} />
           </button>
         </div>
+
+        {view === 'kanban' && (() => {
+          const currentCol = getColumnId(t);
+          const currentIdx = colOrder.indexOf(currentCol);
+          const canLeft = currentIdx > 0;
+          const canRight = currentIdx < colOrder.length - 1;
+          return (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: '6px',
+              borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: '8px',
+            }}>
+              <button
+                onClick={() => canLeft && moveToColumn(t, colOrder[currentIdx - 1])}
+                disabled={!canLeft}
+                className="ghost-btn"
+                style={{ padding: '6px 8px', opacity: canLeft ? 1 : 0.25 }}
+                aria-label="Mover para esquerda"
+                title={canLeft ? `Mover para ${TASK_COLUMNS[currentIdx - 1]?.label}` : ''}
+              >
+                <ArrowLeft size={13} />
+              </button>
+              <select
+                value={currentCol}
+                onChange={(e) => moveToColumn(t, e.target.value)}
+                style={{
+                  flex: 1,
+                  background: 'rgba(255,255,255,0.04)',
+                  color: '#c6cdda',
+                  border: '1px solid rgba(255,255,255,0.1)',
+                  borderRadius: '8px',
+                  padding: '6px 8px',
+                  fontSize: '11px',
+                  cursor: 'pointer',
+                  textAlign: 'center',
+                }}
+              >
+                {TASK_COLUMNS.map((c) => (
+                  <option key={c.id} value={c.id} style={{ background: '#0e1016' }}>
+                    {c.label}
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={() => canRight && moveToColumn(t, colOrder[currentIdx + 1])}
+                disabled={!canRight}
+                className="ghost-btn"
+                style={{ padding: '6px 8px', opacity: canRight ? 1 : 0.25 }}
+                aria-label="Mover para direita"
+                title={canRight ? `Mover para ${TASK_COLUMNS[currentIdx + 1]?.label}` : ''}
+              >
+                <ArrowRight size={13} />
+              </button>
+            </div>
+          );
+        })()}
       </div>
     );
   }
