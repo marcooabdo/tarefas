@@ -98,9 +98,11 @@ Deno.serve(async (req: Request) => {
     const completed = completedTasks ?? [];
     const pending = pendingTasks ?? [];
 
-    const overdue = pending.filter((t) => t.due_date && new Date(t.due_date).getTime() < now);
-    const upcoming = pending.filter((t) => t.due_date && new Date(t.due_date).getTime() >= now);
-    const noDue = pending.filter((t) => !t.due_date);
+    const isRecurring = (t: any) => t.recurrence && t.recurrence !== "none";
+    const overdue = pending.filter((t) => t.due_date && new Date(t.due_date).getTime() < now && !isRecurring(t));
+    const recurring = pending.filter((t) => isRecurring(t));
+    const upcoming = pending.filter((t) => t.due_date && new Date(t.due_date).getTime() >= now && !isRecurring(t));
+    const noDue = pending.filter((t) => !t.due_date && !isRecurring(t));
 
     // Build structured data for ChatGPT
     const completedSummary = completed.map((t) => ({
@@ -141,15 +143,29 @@ Deno.serve(async (req: Request) => {
       codigo: t.task_code || null,
     }));
 
+    const recurringSummary = recurring.map((t) => {
+      const recLabel = t.recurrence === "daily" ? "diaria" : t.recurrence === "weekdays" ? "dias uteis" : t.recurrence === "weekly" ? "semanal" : t.recurrence === "monthly" ? "mensal" : t.recurrence;
+      return {
+        titulo: t.title,
+        descricao: t.description || "",
+        responsavel: t.assignee_name || "Sem responsavel",
+        frequencia: recLabel,
+        codigo: t.task_code || null,
+        ativa: t.nudge_active ?? false,
+      };
+    });
+
     const dataPayload = JSON.stringify({
       data_relatorio: fmtDate(nowIso),
       concluidas_hoje: completedSummary,
       vencidas: overdueSummary,
+      recorrentes: recurringSummary,
       pendentes_com_prazo: upcomingSummary,
       sem_prazo: noDueSummary,
       totais: {
         concluidas: completed.length,
         vencidas: overdue.length,
+        recorrentes: recurring.length,
         pendentes: upcoming.length,
         sem_prazo: noDue.length,
       },
@@ -186,6 +202,7 @@ REGRAS:
 - Nao use crase tripla ou blocos de codigo
 - Escreva em portugues brasileiro informal-profissional
 - Se nao houver tarefas em alguma categoria, mencione brevemente
+- Tarefas RECORRENTES (diarias, semanais, etc) devem aparecer em secao propria "Recorrentes", NAO na secao de vencidas. Elas nao estao atrasadas - sao envios automaticos programados.
 - Maximo 2000 caracteres`,
             },
             {
@@ -261,6 +278,21 @@ REGRAS:
         }
       }
 
+      if (recurring.length > 0) {
+        lines.push(`🔄 *RECORRENTES (${recurring.length})*`);
+        lines.push(``);
+        for (const t of recurring) {
+          const who = t.assignee_name || "Sem responsável";
+          const code = t.task_code ? ` [${t.task_code}]` : "";
+          const freq = t.recurrence === "daily" ? "Diária" : t.recurrence === "weekdays" ? "Dias úteis" : t.recurrence === "weekly" ? "Semanal" : t.recurrence === "monthly" ? "Mensal" : t.recurrence;
+          lines.push(`  🔁 *${t.title}*${code}`);
+          lines.push(`     👤 ${who} | ${freq} | ${t.nudge_active ? "Ativa" : "Pausada"}`);
+          lines.push(``);
+        }
+        lines.push(`━━━━━━━━━━━━━━━━━━`);
+        lines.push(``);
+      }
+
       if (noDue.length > 0) {
         lines.push(`📋 *SEM PRAZO (${noDue.length})*`);
         lines.push(``);
@@ -274,7 +306,7 @@ REGRAS:
       }
 
       lines.push(`━━━━━━━━━━━━━━━━━━`);
-      lines.push(`📈 *Resumo:* ${completed.length} concluída(s), ${overdue.length} vencida(s), ${upcoming.length + noDue.length} pendente(s)`);
+      lines.push(`📈 *Resumo:* ${completed.length} concluída(s), ${overdue.length} vencida(s), ${recurring.length} recorrente(s), ${upcoming.length + noDue.length} pendente(s)`);
       lines.push(``);
       lines.push(`_Relatório gerado automaticamente pela GIA_ 🤖`);
 

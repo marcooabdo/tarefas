@@ -1232,7 +1232,8 @@ REGRAS:
     }
 
     // Command: "GIA relatorio" / "GIA me de o relatorio" triggers daily report
-    const reportMatch = /^\s*GIA\s*[\s:,]+.*(relat[oó]rio|report|resumo\s+di[aá]rio)/i.test(text);
+    // Only match short commands (under 120 chars) to avoid false positives on long create_task commands
+    const reportMatch = text.length < 120 && /^\s*GIA\s*[\s:,]+.*(relat[oó]rio|report|resumo\s+di[aá]rio)/i.test(text);
     if (reportMatch && remoteJid) {
       const { data: settingsRowsRpt } = await supabase.from("app_settings").select("key, value");
       const sRpt: Record<string, string> = {};
