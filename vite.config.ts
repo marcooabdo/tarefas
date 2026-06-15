@@ -31,11 +31,4 @@ const transformIndexHtmlPlugin = () => {
 
 export default defineConfig({
   plugins: [react(), tailwindcss(), transformIndexHtmlPlugin()],
-  build: {
-    rolldownOptions: {
-      output: {
-        codeSplitting: true,
-      },
-    },
-  },
 });
