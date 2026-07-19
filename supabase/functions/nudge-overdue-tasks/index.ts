@@ -90,6 +90,8 @@ Deno.serve(async (req: Request) => {
     const due_now_raw = (tasks ?? []).filter((t) => {
       if (maxNudges > 0 && (t.ai_interventions ?? 0) >= maxNudges) return false;
       if (!t.last_ai_nudge) return true;
+      const isRecurringTask = t.recurrence && t.recurrence !== "none";
+      if (isRecurringTask) return true;
       if (!t.nudge_repeat_hours || t.nudge_repeat_hours <= 0) return false;
       const lastMs = new Date(t.last_ai_nudge).getTime();
       return now - lastMs >= t.nudge_repeat_hours * 60 * 60 * 1000;
@@ -304,7 +306,7 @@ Deno.serve(async (req: Request) => {
               .update({
                 ai_interventions: (task.ai_interventions ?? 0) + 1,
                 last_ai_nudge: new Date().toISOString(),
-                status: "awaiting_response",
+                status: "pending",
                 due_date: nextDue,
                 first_nudge_at: nextDue,
                 nudge_active: true,
