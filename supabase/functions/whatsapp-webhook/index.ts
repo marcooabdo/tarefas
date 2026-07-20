@@ -619,6 +619,37 @@ Deno.serve(async (req: Request) => {
 
           // message_only: just send the message, no task creation
           if (isMessageOnly) {
+            // If scheduled for later, defer to process-scheduled-sends cron
+            if (isScheduledForLater) {
+              await supabase.from("pending_message_approvals")
+                .update({ status: "approved", resolved_at: new Date().toISOString(), scheduled_send_at: scheduledSend })
+                .eq("id", approval.id);
+              if (apiUrlAppr && apiKeyAppr && instanceAppr) {
+                const numberAppr = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
+                const fmtSched = (iso: string) => {
+                  const dt = new Date(iso);
+                  const br = new Date(dt.getTime() - 3 * 60 * 60 * 1000);
+                  const dd = String(br.getUTCDate()).padStart(2, "0");
+                  const mm = String(br.getUTCMonth() + 1).padStart(2, "0");
+                  const hh = String(br.getUTCHours()).padStart(2, "0");
+                  const mi = String(br.getUTCMinutes()).padStart(2, "0");
+                  const days = ["dom", "seg", "ter", "qua", "qui", "sex", "sab"];
+                  return `${days[br.getUTCDay()]} ${dd}/${mm} as ${hh}:${mi}`;
+                };
+                const scheduleMsg = `Agendado! Vou enviar para *${approval.assignee_name}* em ${fmtSched(scheduledSend!)}. Pode ficar tranquilo.`;
+                await fetch(`${apiUrlAppr}/message/sendText/${instanceAppr}`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json", apikey: apiKeyAppr },
+                  body: JSON.stringify({ number: numberAppr, text: scheduleMsg }),
+                });
+              }
+              await logEvent("message-only-scheduled", `to=${approval.assignee_name} send=${scheduledSend}`);
+              return new Response(JSON.stringify({ scheduled: true, message_only: true, send_at: scheduledSend }), {
+                headers: { ...corsHeaders, "Content-Type": "application/json" },
+              });
+            }
+
+            // Send immediately
             if (apiUrlAppr && apiKeyAppr && instanceAppr && approval.proposed_message) {
               const isGroupMO = String(approval.assignee_phone).includes("@g.us");
               let numberMO = isGroupMO ? approval.assignee_phone : normalizePhone(approval.assignee_phone);
@@ -1081,6 +1112,41 @@ REGRAS:
 
           // Handle message_only in approve intent from edit flow
           if (draft.message_only === true) {
+            const scheduledSendEdit = draft.scheduled_send as string | null;
+            const isScheduledForLaterEdit = scheduledSendEdit && new Date(scheduledSendEdit).getTime() > Date.now();
+
+            // If scheduled for later, defer to process-scheduled-sends cron
+            if (isScheduledForLaterEdit) {
+              await supabase.from("pending_message_approvals")
+                .update({ status: "approved", resolved_at: new Date().toISOString(), scheduled_send_at: scheduledSendEdit })
+                .eq("id", approval.id);
+              if (apiUrlEdit && apiKeyEdit && instanceEdit) {
+                const numberEdit = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
+                const fmtSched = (iso: string) => {
+                  const dt = new Date(iso);
+                  const br = new Date(dt.getTime() - 3 * 60 * 60 * 1000);
+                  const dd = String(br.getUTCDate()).padStart(2, "0");
+                  const mm = String(br.getUTCMonth() + 1).padStart(2, "0");
+                  const hh = String(br.getUTCHours()).padStart(2, "0");
+                  const mi = String(br.getUTCMinutes()).padStart(2, "0");
+                  const days = ["dom", "seg", "ter", "qua", "qui", "sex", "sab"];
+                  return `${days[br.getUTCDay()]} ${dd}/${mm} as ${hh}:${mi}`;
+                };
+                const scheduleMsg = `Agendado! Vou enviar para *${approval.assignee_name}* em ${fmtSched(scheduledSendEdit!)}. Pode ficar tranquilo.`;
+                await fetch(`${apiUrlEdit}/message/sendText/${instanceEdit}`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json", apikey: apiKeyEdit },
+                  body: JSON.stringify({ number: numberEdit, text: scheduleMsg }),
+                });
+              }
+              await logEvent("approval-edit-message-only-scheduled", `approval=${approval.id} send=${scheduledSendEdit}`);
+              return new Response(
+                JSON.stringify({ scheduled: true, message_only: true, send_at: scheduledSendEdit }),
+                { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+              );
+            }
+
+            // Send immediately
             if (apiUrlEdit && apiKeyEdit && instanceEdit && approval.proposed_message) {
               const isGroupMO = String(approval.assignee_phone).includes("@g.us");
               let numberMO = isGroupMO ? approval.assignee_phone : normalizePhone(approval.assignee_phone);
