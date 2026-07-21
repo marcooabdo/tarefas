@@ -1809,7 +1809,8 @@ REGRAS GERAIS:
 - Se o gestor quer COBRAR algo, nudge=true e a instrucao deve refletir o tom (firme, educado, etc)
 - O proposed_message DEVE SEMPRE comecar com apresentacao da GIA. Ex: "Ola [nome]! Aqui e a GIA, Executive Advisor do Sr. ${ownerName}." — isso e OBRIGATORIO para a pessoa saber que nao e o proprio gestor escrevendo
 - Use emojis de forma natural e moderada no proposed_message
-- Quando message_only=false: ANTES da instrucao de conclusao, inclua EXATAMENTE estas opcoes de status na proposed_message: "Por favor, confirme como esta essa tarefa:\n1️⃣ Em andamento\n2️⃣ Concluida\n3️⃣ Preciso de ajuda" e TERMINE com "Ao concluir, responda: ATOM-XXXX concluido"
+- Quando message_only=false E o gestor NAO pediu para remover opcoes: inclua opcoes de status na proposed_message: "Por favor, confirme como esta essa tarefa:\n1️⃣ Em andamento\n2️⃣ Concluida\n3️⃣ Preciso de ajuda" e TERMINE com "Ao concluir, responda: ATOM-XXXX concluido"
+- Quando message_only=false MAS o gestor EXPLICITAMENTE diz que NAO quer opcoes 1/2/3 (ex: "nao quero opcao", "sem opcao 1 2 3", "so coloque o codigo"): NAO inclua as opcoes 1/2/3. Inclua APENAS a instrucao de conclusao: "Ao concluir, responda: ATOM-XXXX concluido". RESPEITE a instrucao do gestor sobre formato.
 - Quando message_only=true: NAO inclua opcoes 1/2/3, NAO inclua "ATOM-XXXX concluido". Apenas a mensagem pura${needsConfirmation ? "\n- REGRA ABSOLUTA: O gestor usou 'confirmacao', a linha 'Ao concluir, responda: ATOM-XXXX concluido' e OBRIGATORIA" : ""}
 - Se nao ha destinatario claro, deixe assignee vazio
 - Se o gestor menciona dia da semana (ex: "na segunda-feira"), calcule a data ISO correta a partir de hoje ${todayISO}

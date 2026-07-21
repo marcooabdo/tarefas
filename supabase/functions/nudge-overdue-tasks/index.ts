@@ -244,8 +244,10 @@ Deno.serve(async (req: Request) => {
               `- Informe o prazo REAL da tarefa (${dueLabel}). NÃO invente prazos.\n` +
               `- Se o prazo é futuro (ex: "vence em 2 dias"), diga a data exata: ${task.due_date ? new Date(new Date(task.due_date).getTime() - 3*60*60*1000).toISOString().slice(0,10) : "sem prazo"}\n` +
               `- Use emojis de forma natural e moderada.\n` +
-              `- ANTES da instrucao de conclusao, inclua EXATAMENTE estas opcoes de status (use emojis de numero):\n` +
-              `"Por favor, confirme como esta essa tarefa:\n1️⃣ Em andamento\n2️⃣ Concluida\n3️⃣ Preciso de ajuda"\n` +
+              (/sem op[cç][aã]o|n[aã]o.*op[cç][oõ]es|n[aã]o.*1.*2.*3|s[oó].*conclu[ií]d/i.test(giaInstr)
+                ? `- NAO inclua opcoes 1/2/3 de status. O gestor pediu formato simplificado.\n`
+                : `- ANTES da instrucao de conclusao, inclua EXATAMENTE estas opcoes de status (use emojis de numero):\n` +
+                  `"Por favor, confirme como esta essa tarefa:\n1️⃣ Em andamento\n2️⃣ Concluida\n3️⃣ Preciso de ajuda"\n`) +
               `- A mensagem DEVE terminar com: "Ao concluir, responda: *${task.task_code ?? ""} concluido*"\n` +
               `Nao inclua nada alem da mensagem final.`;
           }
