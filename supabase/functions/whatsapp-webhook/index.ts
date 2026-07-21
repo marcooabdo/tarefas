@@ -1750,6 +1750,7 @@ REGRAS:
           const parsePrompt = `Voce e a GIA, assistente executiva. O gestor enviou este comando por WhatsApp em linguagem natural. Extraia as informacoes estruturadas.
 
 HOJE: ${todayISO} (${todayDayName})
+FUSO HORARIO: America/Sao_Paulo (UTC-3). TODOS os horarios mencionados pelo gestor sao em horario de Brasilia (BRT).
 NOME DO GESTOR: ${ownerName}
 ${needsConfirmation ? "\nATENCAO: O gestor usou a palavra 'confirmacao'. A mensagem DEVE incluir obrigatoriamente: 'Ao concluir, responda: ATOM-XXXX concluido'\n" : ""}
 CONTATOS E GRUPOS CADASTRADOS (use o nome EXATO daqui quando possivel):
@@ -1765,10 +1766,11 @@ Responda APENAS com JSON valido (sem markdown, sem crase), com estes campos:
   "assignees": ["lista de nomes se houver MULTIPLOS destinatarios, senao array vazio"],
   "is_group": false,
   "priority": "high/medium/low",
-  "scheduled_send_iso": "data e hora de QUANDO A MENSAGEM deve ser ENVIADA, em ISO 8601. Se 'envia amanha 08:30' -> amanha 08:30. Se 'envia agora' ou nao especifica -> vazio (envio imediato).",
-  "due_date_iso": "data e hora do PRAZO FINAL da tarefa (quando a pessoa deve ter CONCLUIDO). Pode ser diferente do scheduled_send_iso. Se nao ha prazo, vazio.",
+  "scheduled_send_iso": "data e hora de QUANDO A MENSAGEM deve ser ENVIADA, formato ISO 8601 SEM timezone (ex: 2026-07-22T09:00:00). IMPORTANTE: O horario deve ser EXATAMENTE o que o gestor falou em BRT. Se disse '9 da manha' -> T09:00:00. Se disse '14h' -> T14:00:00. NAO converta para UTC, NAO adicione Z ou +00:00. Se 'envia agora' ou nao especifica -> string vazia.",
+  "due_date_iso": "data e hora do PRAZO FINAL da tarefa (quando a pessoa deve ter CONCLUIDO). Mesmo formato: ISO 8601 SEM timezone, horario em BRT. Se disse 'prazo as 9 da manha do dia 31' -> 2026-07-31T09:00:00. Se nao ha prazo, string vazia.",
   "recurrence": "none/daily/weekly/monthly/weekdays",
   "recurrence_interval": 1,
+  "nudge_repeat_hours": 24,
   "nudge": true,
   "message_only": false,
   "instruction": "instrucao de COMO a GIA deve agir - ex: 'seja firme', 'apenas envie sem pedir resposta', 'cobre normalmente'",
@@ -1814,6 +1816,8 @@ REGRAS GERAIS:
 - Se o gestor menciona horario (ex: "08:30hr"), inclua no campo correto (scheduled_send_iso ou due_date_iso conforme contexto)
 - Se o gestor quer enviar para VARIOS contatos/pessoas, liste em "assignees"
 - Se e uma tarefa recorrente (ex: "toda segunda", "todo dia"), defina recurrence adequadamente
+- nudge_repeat_hours = intervalo entre cobranças em horas. Se recorrencia "diaria" ou "todo dia" -> nudge_repeat_hours = 24. Se "a cada 12h" -> 12. Se "semanal" -> 168. Se o gestor disser "a cada X horas" -> use X. Default: 24 para diarias.
+- recurrence_interval = quantos periodos entre repeticoes. "todo dia" = daily + interval 1. "a cada 2 dias" = daily + interval 2. "toda semana" = weekly + interval 1.
 - Se o gestor da instrucoes especificas de como enviar, coloque em instruction`;
 
           try {
@@ -1880,6 +1884,14 @@ REGRAS GERAIS:
               // Calculate first_nudge_at based on due_date (nudge starts after deadline)
               let firstNudgeNL: string | null = dueDateNL;
               const defaultRepeatHoursNL = Number(sNL["default_repeat_hours"] || "4") || 4;
+              // Use GPT's nudge_repeat_hours if provided, else infer from recurrence
+              let nudgeRepeatHoursNL = Number(parsed.nudge_repeat_hours) || 0;
+              if (!nudgeRepeatHoursNL) {
+                if (recurrence === "daily") nudgeRepeatHoursNL = 24;
+                else if (recurrence === "weekdays") nudgeRepeatHoursNL = 24;
+                else if (recurrence === "weekly") nudgeRepeatHoursNL = 168;
+                else nudgeRepeatHoursNL = defaultRepeatHoursNL;
+              }
               if (!firstNudgeNL && shouldNudge) {
                 firstNudgeNL = new Date(Date.now() + 60 * 60 * 1000).toISOString();
               }
@@ -1945,7 +1957,7 @@ REGRAS GERAIS:
                   } else if (groupCandidates.length > 1) {
                     const confirmationNeeded = await askConfirmation(
                       supabase, sNL, remoteJid, assigneeRaw, groupCandidates,
-                      { title, description, priority, due_date: dueDateNL, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: firstNudgeNL, nudge_repeat_hours: shouldNudge ? defaultRepeatHoursNL : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true, send_now: sendNowNL, scheduled_send: scheduledSendNL, message_only: messageOnly }
+                      { title, description, priority, due_date: dueDateNL, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: firstNudgeNL, nudge_repeat_hours: shouldNudge ? nudgeRepeatHoursNL : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true, send_now: sendNowNL, scheduled_send: scheduledSendNL, message_only: messageOnly }
                     );
                     if (confirmationNeeded) {
                       await logEvent("gia-nl-awaiting-confirmation", `group="${assigneeRaw}"`);
@@ -1960,7 +1972,7 @@ REGRAS GERAIS:
                     if (allCandidates.length > 0) {
                       const confirmationNeeded = await askConfirmation(
                         supabase, sNL, remoteJid, assigneeRaw, allCandidates,
-                        { title, description, priority, due_date: dueDateNL, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: firstNudgeNL, nudge_repeat_hours: shouldNudge ? defaultRepeatHoursNL : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true, send_now: sendNowNL, scheduled_send: scheduledSendNL, message_only: messageOnly }
+                        { title, description, priority, due_date: dueDateNL, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: firstNudgeNL, nudge_repeat_hours: shouldNudge ? nudgeRepeatHoursNL : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true, send_now: sendNowNL, scheduled_send: scheduledSendNL, message_only: messageOnly }
                       );
                       if (confirmationNeeded) {
                         await logEvent("gia-nl-awaiting-confirmation", `group="${assigneeRaw}" whatsapp`);
@@ -2009,7 +2021,7 @@ REGRAS GERAIS:
                     }));
                     const confirmationNeeded = await askConfirmation(
                       supabase, sNL, remoteJid, assigneeRaw, candidates,
-                      { title, description, priority, due_date: dueDateNL, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: firstNudgeNL, nudge_repeat_hours: shouldNudge ? defaultRepeatHoursNL : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true, send_now: sendNowNL, scheduled_send: scheduledSendNL, message_only: messageOnly }
+                      { title, description, priority, due_date: dueDateNL, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: firstNudgeNL, nudge_repeat_hours: shouldNudge ? nudgeRepeatHoursNL : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true, send_now: sendNowNL, scheduled_send: scheduledSendNL, message_only: messageOnly }
                     );
                     if (confirmationNeeded) {
                       await logEvent("gia-nl-awaiting-confirmation", `assignee="${assigneeRaw}"`);
@@ -2025,7 +2037,7 @@ REGRAS GERAIS:
                   if (whatsappCandidates.length > 0) {
                     const confirmationNeeded = await askConfirmation(
                       supabase, sNL, remoteJid, assigneeRaw, whatsappCandidates,
-                      { title, description, priority, due_date: dueDateNL, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: firstNudgeNL, nudge_repeat_hours: shouldNudge ? defaultRepeatHoursNL : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true, send_now: sendNowNL, scheduled_send: scheduledSendNL, message_only: messageOnly }
+                      { title, description, priority, due_date: dueDateNL, recurrence, recurrence_interval: recurrenceInterval, first_nudge_at: firstNudgeNL, nudge_repeat_hours: shouldNudge ? nudgeRepeatHoursNL : 0, nudge_active: shouldNudge, gia_instruction: instruction, proposed_message: proposedMessage, group_name: groupName, is_nl_command: true, send_now: sendNowNL, scheduled_send: scheduledSendNL, message_only: messageOnly }
                     );
                     if (confirmationNeeded) {
                       await logEvent("gia-nl-awaiting-confirmation", `assignee="${assigneeRaw}" whatsapp`);
@@ -2118,7 +2130,7 @@ REGRAS GERAIS:
                 const taskDraft = {
                   title, description, priority, recurrence, recurrence_interval: recurrenceInterval,
                   due_date: dueDateNL, first_nudge_at: firstNudgeNL,
-                  nudge_repeat_hours: shouldNudge ? defaultRepeatHoursNL : 0,
+                  nudge_repeat_hours: shouldNudge ? nudgeRepeatHoursNL : 0,
                   nudge_active: shouldNudge,
                   gia_instruction: instruction,
                   group_name: groupName,
