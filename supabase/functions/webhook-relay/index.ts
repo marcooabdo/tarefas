@@ -29,7 +29,7 @@ Deno.serve(async (req: Request) => {
       .maybeSingle();
 
     const extraUrls: string[] = (extraSetting?.value ?? "")
-      .split(",")
+      .split(/[,\n]+/)
       .map((u: string) => u.trim())
       .filter((u: string) => u.length > 0 && u.startsWith("http"));
 
