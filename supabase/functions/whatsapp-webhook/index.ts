@@ -301,6 +301,8 @@ Deno.serve(async (req: Request) => {
     payload?.remoteJid ??
     "";
   const fromMe: boolean = Boolean(data?.key?.fromMe ?? data?.message?.key?.fromMe ?? payload?.fromMe);
+  const participant: string = data?.key?.participant ?? data?.message?.key?.participant ?? "";
+  const isGroup: boolean = remoteJid.endsWith("@g.us");
   const internalReinvoke: boolean = Boolean(payload?.internal_reinvoke);
   const msg = data?.message ?? data?.messages?.[0]?.message ?? data ?? {};
   const buttonId: string =
@@ -1305,7 +1307,7 @@ REGRAS:
       const sRpt: Record<string, string> = {};
       for (const row of settingsRowsRpt ?? []) sRpt[row.key] = row.value;
       const ownerPhoneRpt = sRpt["owner_phone"] ?? "";
-      const incomingRpt = remoteJid.split("@")[0];
+      const incomingRpt = (isGroup && participant) ? participant.split("@")[0] : remoteJid.split("@")[0];
       const isOwnerRpt = ownerPhoneRpt && phonesMatch(ownerPhoneRpt, incomingRpt);
 
       if (isOwnerRpt) {
@@ -1316,9 +1318,9 @@ REGRAS:
             "Content-Type": "application/json",
             Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
           },
-          body: JSON.stringify({}),
+          body: JSON.stringify({ target_jid: isGroup ? remoteJid : undefined }),
         });
-        await logEvent("report-triggered", "Owner requested daily report via command");
+        await logEvent("report-triggered", `Owner requested daily report via command target=${isGroup ? remoteJid : "default"}`);
         return new Response(
           JSON.stringify({ action: "report-triggered" }),
           { headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -1332,7 +1334,7 @@ REGRAS:
       const settingsGia: Record<string, string> = {};
       for (const row of settingsRowsGia ?? []) settingsGia[row.key] = row.value;
       const ownerPhone = settingsGia["owner_phone"] ?? "";
-      const incoming = remoteJid.split("@")[0];
+      const incoming = (isGroup && participant) ? participant.split("@")[0] : remoteJid.split("@")[0];
       const isOwner = ownerPhone && phonesMatch(ownerPhone, incoming);
 
       if (isOwner) {
@@ -1611,7 +1613,7 @@ REGRAS:
       const sNL: Record<string, string> = {};
       for (const row of settingsNL ?? []) sNL[row.key] = row.value;
       const ownerPhoneNL = sNL["owner_phone"] ?? "";
-      const incomingNL = remoteJid.split("@")[0];
+      const incomingNL = (isGroup && participant) ? participant.split("@")[0] : remoteJid.split("@")[0];
       const isOwnerNL = ownerPhoneNL && phonesMatch(ownerPhoneNL, incomingNL);
 
       if (isOwnerNL) {
@@ -2331,7 +2333,7 @@ REGRAS GERAIS:
       const sChat: Record<string, string> = {};
       for (const row of settingsChat ?? []) sChat[row.key] = row.value;
       const ownerPhoneChat = sChat["owner_phone"] ?? "";
-      const incomingChat = remoteJid.split("@")[0];
+      const incomingChat = (isGroup && participant) ? participant.split("@")[0] : remoteJid.split("@")[0];
       const isOwnerChat = ownerPhoneChat && phonesMatch(ownerPhoneChat, incomingChat);
 
       if (isOwnerChat) {
@@ -2843,7 +2845,6 @@ Se nao e uma acao especial, apenas responda normalmente como assistente intelige
 
     const autoRead = settings["ai_auto_read_groups"] !== "false";
     const autoReply = settings["ai_auto_reply"] !== "false";
-    const isGroup = remoteJid.endsWith("@g.us");
 
     // Skip groups that belong to other systems (e.g. financial)
     const excludedJids = (settings["excluded_group_jids"] ?? "").split(",").map((s: string) => s.trim()).filter(Boolean);

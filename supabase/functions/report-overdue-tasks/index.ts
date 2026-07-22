@@ -41,6 +41,12 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
+    let targetJid = "";
+    try {
+      const body = await req.json();
+      targetJid = body?.target_jid ?? "";
+    } catch { /* no body or invalid JSON */ }
+
     const supabase = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
@@ -313,12 +319,12 @@ REGRAS:
       message = lines.join("\n");
     }
 
-    const number = String(reportPhone).replace(/\D/g, "");
+    const sendTo = targetJid || String(reportPhone).replace(/\D/g, "");
 
     const sendRes = await fetch(`${apiUrl}/message/sendText/${instanceName}`, {
       method: "POST",
       headers: { "Content-Type": "application/json", apikey: apiKey },
-      body: JSON.stringify({ number, text: message }),
+      body: JSON.stringify({ number: sendTo, text: message }),
     });
 
     const sendOk = sendRes.ok;
