@@ -50,7 +50,7 @@ Deno.serve(async (req: Request) => {
     const { data: settings } = await supabase
       .from("app_settings")
       .select("key, value")
-      .in("key", ["evolution_api_url", "evolution_api_key", "evolution_instance"]);
+      .in("key", ["evolution_api_url", "evolution_api_key", "evolution_instance_name"]);
 
     const settingsMap: Record<string, string> = {};
     (settings ?? []).forEach((s: { key: string; value: string }) => {
@@ -59,7 +59,7 @@ Deno.serve(async (req: Request) => {
 
     const evoUrl = settingsMap["evolution_api_url"];
     const evoKey = settingsMap["evolution_api_key"];
-    const evoInstance = settingsMap["evolution_instance"];
+    const evoInstance = settingsMap["evolution_instance_name"];
 
     if (!evoUrl || !evoKey || !evoInstance) {
       console.error("Evolution API settings not configured");
@@ -73,14 +73,65 @@ Deno.serve(async (req: Request) => {
 
     for (const approval of pendingSends) {
       const phone = approval.assignee_phone;
-      const message = approval.proposed_message;
+      let message = approval.proposed_message;
       const taskDraft = approval.task_draft ?? {};
       const isGroup = phone.includes("@g.us");
 
       try {
+        // Create or fetch task BEFORE sending so we have the real task_code
+        let taskCode = "";
+        if (approval.task_id) {
+          // Task already exists - fetch its code
+          const { data: existingTask } = await supabase
+            .from("tasks")
+            .select("task_code")
+            .eq("id", approval.task_id)
+            .maybeSingle();
+          taskCode = existingTask?.task_code ?? "";
+        } else if (!taskDraft.message_only) {
+          // Create task first to get the real code
+          const { data: newTask } = await supabase
+            .from("tasks")
+            .insert({
+              title: taskDraft.title || "Tarefa sem título",
+              description: taskDraft.description || "",
+              assignee_name: approval.assignee_name || "",
+              assignee_phone: phone,
+              group_name: taskDraft.group_name || "",
+              status: "awaiting_response",
+              priority: taskDraft.priority || "medium",
+              due_date: taskDraft.due_date || null,
+              recurrence: taskDraft.recurrence || "none",
+              recurrence_interval: taskDraft.recurrence_interval || 1,
+              first_nudge_at: taskDraft.first_nudge_at || null,
+              nudge_repeat_hours: taskDraft.nudge_repeat_hours || 0,
+              nudge_active: !!taskDraft.nudge_active,
+              gia_instruction: taskDraft.gia_instruction || "",
+              ai_interventions: 1,
+              last_ai_nudge: new Date().toISOString(),
+            })
+            .select("id, task_code")
+            .maybeSingle();
+
+          if (newTask) {
+            taskCode = newTask.task_code ?? "";
+            await supabase
+              .from("pending_message_approvals")
+              .update({ task_id: newTask.id })
+              .eq("id", approval.id);
+          }
+        }
+
+        // Replace ATOM-XXXX placeholder with real task code
+        if (taskCode && message.includes("ATOM-XXXX")) {
+          message = message.replace(/ATOM-XXXX/g, taskCode);
+        } else if (!taskCode && message.includes("ATOM-XXXX")) {
+          // No task code available - remove the placeholder line entirely
+          message = message.replace(/\s*Ao concluir, responda: ATOM-XXXX conclu[ií]do\.?/g, "");
+        }
+
         // Send via Evolution API
-        const endpoint = isGroup ? "sendText" : "sendText";
-        const sendUrl = `${evoUrl}/message/${endpoint}/${evoInstance}`;
+        const sendUrl = `${evoUrl}/message/sendText/${evoInstance}`;
         const body: Record<string, unknown> = {
           number: phone,
           text: message,
@@ -117,7 +168,7 @@ Deno.serve(async (req: Request) => {
           sent_at: new Date().toISOString(),
         });
 
-        // If there's a linked task, update it
+        // If there was an existing task, update it
         if (approval.task_id) {
           await supabase
             .from("tasks")
@@ -128,37 +179,6 @@ Deno.serve(async (req: Request) => {
               nudge_active: !!taskDraft.nudge_active,
             })
             .eq("id", approval.task_id);
-        } else if (!taskDraft.message_only) {
-          // Create a task from the draft if needed
-          const { data: newTask } = await supabase
-            .from("tasks")
-            .insert({
-              title: taskDraft.title || "Tarefa sem título",
-              description: taskDraft.description || "",
-              assignee_name: approval.assignee_name || "",
-              assignee_phone: phone,
-              group_name: taskDraft.group_name || "",
-              status: "awaiting_response",
-              priority: taskDraft.priority || "medium",
-              due_date: taskDraft.due_date || null,
-              recurrence: taskDraft.recurrence || "none",
-              recurrence_interval: taskDraft.recurrence_interval || 1,
-              first_nudge_at: taskDraft.first_nudge_at || null,
-              nudge_repeat_hours: taskDraft.nudge_repeat_hours || 0,
-              nudge_active: !!taskDraft.nudge_active,
-              gia_instruction: taskDraft.gia_instruction || "",
-              ai_interventions: 1,
-              last_ai_nudge: new Date().toISOString(),
-            })
-            .select("id")
-            .maybeSingle();
-
-          if (newTask) {
-            await supabase
-              .from("pending_message_approvals")
-              .update({ task_id: newTask.id })
-              .eq("id", approval.id);
-          }
         }
 
         // Notify the owner that the scheduled message was sent

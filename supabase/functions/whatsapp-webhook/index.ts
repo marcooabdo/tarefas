@@ -929,8 +929,8 @@ REGRAS:
           // Find the new contact/group by exact or fuzzy name match
           const destLower = newDestination.toLowerCase();
           const matchedContact = (editContacts ?? []).find(c => c.name.toLowerCase() === destLower)
-            ?? (editContacts ?? []).find(c => c.name.toLowerCase().includes(destLower))
-            ?? (editContacts ?? []).find(c => destLower.includes(c.name.toLowerCase()));
+            ?? (editContacts ?? []).find(c => c.name.toLowerCase().startsWith(destLower) || destLower.startsWith(c.name.toLowerCase()))
+            ?? (editContacts ?? []).find(c => c.name.toLowerCase().includes(destLower));
 
           if (matchedContact) {
             const newPhone = matchedContact.remote_jid
@@ -1491,14 +1491,16 @@ REGRAS:
               if (c.is_group) groupName = c.name;
             } else if (byName && byName.length > 1) {
               const exact = byName.find((c) => c.name.toLowerCase() === assigneeRaw.toLowerCase());
-              if (exact) {
-                assigneeName = exact.name;
-                if (exact.remote_jid) {
-                  assigneePhone = exact.is_group ? String(exact.remote_jid) : normalizePhone(String(exact.remote_jid).split("@")[0]);
+              const startsWith = !exact ? byName.filter((c) => c.name.toLowerCase().startsWith(assigneeRaw.toLowerCase())) : [];
+              const resolved = exact || (startsWith.length === 1 ? startsWith[0] : null);
+              if (resolved) {
+                assigneeName = resolved.name;
+                if (resolved.remote_jid) {
+                  assigneePhone = resolved.is_group ? String(resolved.remote_jid) : normalizePhone(String(resolved.remote_jid).split("@")[0]);
                 } else {
-                  assigneePhone = normalizePhone(String(exact.phone ?? ""));
+                  assigneePhone = normalizePhone(String(resolved.phone ?? ""));
                 }
-                if (exact.is_group) groupName = exact.name;
+                if (resolved.is_group) groupName = resolved.name;
               } else {
                 const candidates = byName.map((c) => ({
                   remote_jid: c.remote_jid ?? "",
@@ -1735,6 +1737,84 @@ REGRAS:
           }
           // ── END RE-NUDGE FLOW ─────────────────────────────────────────────────
 
+          // ── SAVE CONTACT FLOW ─────────────────────────────────────────────────
+          const saveContactMatch = /\b(?:salva|salvar|cadastra|cadastrar|adiciona|adicionar)\s+(?:o\s+)?(?:contato|numero|telefone)\s+(.+)/i.exec(freeText);
+          if (saveContactMatch) {
+            const savePayload = saveContactMatch[1].trim();
+            // Extract phone number from the text
+            const phoneMatch = savePayload.match(/(?:\+?55[\s\-]?)?(\(?\d{2}\)?[\s\-]?\d{4,5}[\s\-]?\d{4})/);
+            const rawPhone = phoneMatch ? phoneMatch[1].replace(/[\s\-().]/g, "") : null;
+            // Extract name - try patterns like "da Michelly", "de fulano", or just a name before/after the phone
+            const namePatterns = [
+              /(?:da|do|de|d[oa]s?)\s+([A-ZÀ-ÖØ-öø-ÿ][a-zà-öø-ÿ]+(?:\s+[A-ZÀ-ÖØ-öø-ÿ][a-zà-öø-ÿ]+)*)/i,
+              /([A-ZÀ-ÖØ-öø-ÿ][a-zà-öø-ÿ]+(?:\s+[A-ZÀ-ÖØ-öø-ÿ][a-zà-öø-ÿ]+)*)\s+(?:\+?55|\(?\d{2}\)?)/i,
+              /(?:como|nome)\s+([A-ZÀ-ÖØ-öø-ÿ][a-zà-öø-ÿ]+(?:\s+[A-ZÀ-ÖØ-öø-ÿ][a-zà-öø-ÿ]+)*)/i,
+            ];
+            let contactName = "";
+            for (const p of namePatterns) {
+              const m = p.exec(savePayload);
+              if (m) { contactName = m[1].trim(); break; }
+            }
+            // Fallback: if we have a phone, remove it and use remaining as name
+            if (!contactName && rawPhone) {
+              contactName = savePayload.replace(/(?:\+?55[\s\-]?)?(?:\(?\d{2}\)?[\s\-]?\d{4,5}[\s\-]?\d{4})/, "")
+                .replace(/[,\-–—]/g, " ").replace(/\b(da|do|de|dos|das|o|a|e|é)\b/gi, " ")
+                .replace(/\s{2,}/g, " ").trim();
+            }
+
+            if (rawPhone && contactName) {
+              const normalized = rawPhone.length <= 11 ? "55" + rawPhone : (rawPhone.startsWith("55") ? rawPhone : "55" + rawPhone);
+              // Check if contact already exists
+              const { data: existing } = await supabase
+                .from("contacts")
+                .select("id, name")
+                .or(`phone.ilike.%${rawPhone}%,remote_jid.ilike.%${normalized}%`)
+                .limit(1)
+                .maybeSingle();
+
+              let replyMsg = "";
+              if (existing) {
+                // Update name if different
+                if (existing.name.toLowerCase() !== contactName.toLowerCase()) {
+                  await supabase.from("contacts").update({ name: contactName }).eq("id", existing.id);
+                  replyMsg = `Contato atualizado! "${existing.name}" agora se chama "${contactName}". Quando voce pedir pra enviar pra ${contactName}, vou usar esse numero.`;
+                } else {
+                  replyMsg = `O contato "${contactName}" ja esta salvo com esse numero. Pode usar o nome normalmente nos proximos comandos.`;
+                }
+              } else {
+                await supabase.from("contacts").insert({
+                  name: contactName,
+                  phone: normalized,
+                  country_code: "+55",
+                  department: "",
+                  is_group: false,
+                  remote_jid: `${normalized}@s.whatsapp.net`,
+                  active: true,
+                });
+                replyMsg = `Contato "${contactName}" salvo com sucesso (${normalized})! Agora e so falar "GIA envia mensagem pra ${contactName}" que eu encontro direto.`;
+              }
+              await logEvent("gia-save-contact", `name="${contactName}" phone=${normalized}`);
+
+              // Send reply back
+              const apiUrlSave = sNL["api_url"] ?? "";
+              const apiKeySave = sNL["api_key"] ?? "";
+              const instanceSave = sNL["instance_name"] ?? "";
+              if (apiUrlSave && apiKeySave && instanceSave) {
+                const numberSave = remoteJid.endsWith("@g.us") ? remoteJid : normalizePhone(remoteJid.split("@")[0]);
+                await fetch(`${apiUrlSave}/message/sendText/${instanceSave}`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json", apikey: apiKeySave },
+                  body: JSON.stringify({ number: numberSave, text: replyMsg }),
+                });
+              }
+              return new Response(JSON.stringify({ action: "contact_saved", name: contactName, phone: normalized }), {
+                headers: { ...corsHeaders, "Content-Type": "application/json" },
+              });
+            }
+            // If couldn't parse name/phone, fall through to general NL flow
+          }
+          // ── END SAVE CONTACT FLOW ─────────────────────────────────────────────
+
           const needsConfirmation = /\bconfirma[cç][aã]o\b/i.test(freeText);
 
           // Load contacts for the prompt so GPT can match exact names
@@ -1762,7 +1842,8 @@ Responda APENAS com JSON valido (sem markdown, sem crase), com estes campos:
 {
   "title": "titulo curto da tarefa/acao (max 80 chars)",
   "description": "descricao completa do que fazer",
-  "assignee": "nome da PESSOA ou GRUPO destinatario da mensagem (ONDE a mensagem sera enviada)",
+  "assignee": "nome da PESSOA ou GRUPO destinatario da mensagem (ONDE a mensagem sera enviada). Use o nome EXATO que o gestor digitou. Se ele disse 'Michelly', coloque 'Michelly' (nao 'Michel', nao 'Michelle'). Se o nome aparece na lista de contatos, use a grafia EXATA da lista.",
+  "assignee_phone": "telefone do destinatario SE o gestor forneceu explicitamente no comando (ex: '+55 34 9828-7316' -> '553498287316'). Apenas digitos com DDI 55. Se nao forneceu telefone, string vazia.",
   "assignees": ["lista de nomes se houver MULTIPLOS destinatarios, senao array vazio"],
   "is_group": false,
   "priority": "high/medium/low",
@@ -1811,8 +1892,11 @@ REGRAS GERAIS:
 - Use emojis de forma natural e moderada no proposed_message
 - Quando message_only=false E o gestor NAO pediu para remover opcoes: inclua opcoes de status na proposed_message: "Por favor, confirme como esta essa tarefa:\n1️⃣ Em andamento\n2️⃣ Concluida\n3️⃣ Preciso de ajuda" e TERMINE com "Ao concluir, responda: ATOM-XXXX concluido"
 - Quando message_only=false MAS o gestor EXPLICITAMENTE diz que NAO quer opcoes 1/2/3 (ex: "nao quero opcao", "sem opcao 1 2 3", "so coloque o codigo"): NAO inclua as opcoes 1/2/3. Inclua APENAS a instrucao de conclusao: "Ao concluir, responda: ATOM-XXXX concluido". RESPEITE a instrucao do gestor sobre formato.
+- NUNCA escreva "digite o numero da tarefa" ou "escreva concluida". SEMPRE use o formato EXATO: "Ao concluir, responda: ATOM-XXXX concluido" (o sistema vai substituir ATOM-XXXX pelo codigo real automaticamente).
 - Quando message_only=true: NAO inclua opcoes 1/2/3, NAO inclua "ATOM-XXXX concluido". Apenas a mensagem pura${needsConfirmation ? "\n- REGRA ABSOLUTA: O gestor usou 'confirmacao', a linha 'Ao concluir, responda: ATOM-XXXX concluido' e OBRIGATORIA" : ""}
 - Se nao ha destinatario claro, deixe assignee vazio
+- CRITICO sobre nomes: Use EXATAMENTE o nome que o gestor digitou, letra por letra. Se ele escreveu "Michelly", coloque "Michelly" - NUNCA "Michel", "Michelle", "Micheli". Se o nome aparece na lista de contatos abaixo, use a grafia exata da lista.
+- Se o gestor forneceu um telefone (ex: "+55 34 9828-7316"), extraia APENAS digitos com DDI em assignee_phone: "553498287316". Isso tem PRIORIDADE sobre buscar nos contatos.
 - Se o gestor menciona dia da semana (ex: "na segunda-feira"), calcule a data ISO correta a partir de hoje ${todayISO}
 - Se o gestor menciona horario (ex: "08:30hr"), inclua no campo correto (scheduled_send_iso ou due_date_iso conforme contexto)
 - Se o gestor quer enviar para VARIOS contatos/pessoas, liste em "assignees"
@@ -1905,21 +1989,46 @@ REGRAS GERAIS:
               // If the user typed a phone number directly in the command, skip contact search
               // Matches formats like: 34 9123-4561, 349123-4561, +55 34 91234-5678, (34)91234-5678
               const inlinePhoneMatch = freeText.match(/(?:^|[\s(])(?:\+?55[\s\-]?)?(\(?\d{2}\)?[\s\-]?\d{4,5}[\s\-]?\d{4})(?=[\s,.]|$)/);
-              const inlinePhone = inlinePhoneMatch ? inlinePhoneMatch[1].replace(/[\s\-().]/g, "") : null;
-              if (inlinePhone && assigneeRaw) {
-                const normalized = inlinePhone.length <= 11 ? "55" + inlinePhone : inlinePhone;
-                assigneeName = assigneeRaw;
+              const inlinePhoneFromText = inlinePhoneMatch ? inlinePhoneMatch[1].replace(/[\s\-().]/g, "") : null;
+              const inlinePhoneFromGPT = parsed.assignee_phone ? String(parsed.assignee_phone).replace(/[^\d]/g, "") : null;
+              const inlinePhone = inlinePhoneFromText || (inlinePhoneFromGPT && inlinePhoneFromGPT.length >= 10 ? inlinePhoneFromGPT : null);
+
+              if (inlinePhone) {
+                const normalized = inlinePhone.length <= 11 ? "55" + inlinePhone : (inlinePhone.startsWith("55") ? inlinePhone : "55" + inlinePhone);
                 assigneePhone = normalized;
-                // Try to enrich name from contacts if available
+                // Use the name the user provided. If GPT didn't extract it, try to parse from text
+                const nameFromUser = assigneeRaw || (() => {
+                  const nameMatch = freeText.match(/(?:[eé]\s+)?(?:da|do|de)\s+([A-Z\u00c0-\u00ff][a-z\u00e0-\u00ff]+(?:\s+[A-Z\u00c0-\u00ff][a-z\u00e0-\u00ff]+)*)/i);
+                  return nameMatch ? nameMatch[1] : "";
+                })();
+                // Check if this phone already exists in contacts (non-group only)
+                const lastDigits = inlinePhone.slice(-8);
                 const { data: byPhone } = await supabase
                   .from("contacts")
-                  .select("name, phone, remote_jid")
-                  .or(`phone.ilike.%${inlinePhone}%,remote_jid.ilike.%${inlinePhone}%`)
-                  .limit(1)
-                  .maybeSingle();
-                if (byPhone) {
-                  assigneeName = byPhone.name;
-                  assigneePhone = byPhone.remote_jid ? normalizePhone(String(byPhone.remote_jid).split("@")[0]) : normalizePhone(String(byPhone.phone ?? ""));
+                  .select("id, name, phone, remote_jid")
+                  .eq("is_group", false)
+                  .or(`phone.ilike.%${lastDigits}%,remote_jid.ilike.%${lastDigits}%`)
+                  .limit(5);
+                const exactPhoneMatch = (byPhone ?? []).find(c => {
+                  const cPhone = normalizePhone(String(c.remote_jid ?? c.phone ?? "").split("@")[0]);
+                  return cPhone.endsWith(lastDigits);
+                });
+                if (exactPhoneMatch) {
+                  assigneeName = nameFromUser || exactPhoneMatch.name;
+                  assigneePhone = exactPhoneMatch.remote_jid ? normalizePhone(String(exactPhoneMatch.remote_jid).split("@")[0]) : normalized;
+                  if (nameFromUser && nameFromUser.toLowerCase() !== exactPhoneMatch.name.toLowerCase()) {
+                    await supabase.from("contacts").update({ name: nameFromUser }).eq("id", exactPhoneMatch.id);
+                  }
+                } else {
+                  assigneeName = nameFromUser || normalized;
+                  if (nameFromUser) {
+                    await supabase.from("contacts").insert({
+                      name: nameFromUser, phone: normalized, country_code: "+55",
+                      department: "", is_group: false,
+                      remote_jid: `${normalized}@s.whatsapp.net`, active: true,
+                    });
+                    await logEvent("gia-nl-auto-saved-contact", `name="${nameFromUser}" phone=${normalized}`);
+                  }
                 }
               } else if (assigneeRaw) {
                 // Search in contacts - filter by is_group when GPT identified a group target
@@ -1933,6 +2042,16 @@ REGRAS GERAIS:
 
                 // If targeting a group and found groups, filter to only groups
                 let filteredResults = byName ?? [];
+                // Prioritize: exact match > starts-with > contains
+                if (filteredResults.length > 1) {
+                  const exactMatch = filteredResults.find((c) => c.name.toLowerCase() === assigneeRaw.toLowerCase());
+                  if (exactMatch) {
+                    filteredResults = [exactMatch];
+                  } else {
+                    const startsWithMatch = filteredResults.filter((c) => c.name.toLowerCase().startsWith(assigneeRaw.toLowerCase()));
+                    if (startsWithMatch.length >= 1) filteredResults = startsWithMatch;
+                  }
+                }
                 if (targetIsGroup && filteredResults.length === 0) {
                   // No groups found in contacts with that name, search WhatsApp directly for groups
                   const whatsappCandidates = await searchWhatsAppChats(sNL, assigneeRaw);
@@ -2176,7 +2295,7 @@ REGRAS GERAIS:
                   if (!sendNowNL && scheduledSendNL) lines.push(`Envio agendado: ${fmtDateNL(scheduledSendNL)}`);
                   else lines.push(`Envio: AGORA`);
                   if (dueDateNL) lines.push(`Prazo final: ${fmtDateNL(dueDateNL)}`);
-                  if (shouldNudge && dueDateNL) lines.push(`Cobranca apos prazo: a cada ${defaultRepeatHoursNL}h`);
+                  if (shouldNudge && dueDateNL) lines.push(`Cobranca apos prazo: a cada ${nudgeRepeatHoursNL}h`);
                   if (recurrence !== "none") lines.push(`Recorrencia: ${recurrence}${recurrenceInterval > 1 ? ` x${recurrenceInterval}` : ""}`);
                   const infoBlock = lines.map(l => `// ${l}`).join("\n");
                   const previewMsg = proposedMessage.replace(/ATOM-XXXX/g, "(codigo gerado automaticamente)");
