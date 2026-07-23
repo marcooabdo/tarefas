@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Plus, Phone, Users as Users2, Clock, Zap, CircleAlert as AlertCircle, Flame, Trash2, Send, LayoutGrid, List as ListIcon, X, Search, Check, Repeat, Pencil, ArrowLeft, ArrowRight } from 'lucide-react';
+import { Plus, Phone, Users as Users2, Clock, Zap, CircleAlert as AlertCircle, Flame, Trash2, Send, LayoutGrid, List as ListIcon, X, Search, Check, Repeat, Pencil, ArrowLeft, ArrowRight, Loader as Loader2 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import type { Task, TaskPriority, TaskStatus, TaskRecurrence, Contact } from '../lib/types';
 import { TASK_COLUMNS, RECURRENCE_OPTIONS } from '../lib/types';
@@ -91,6 +91,13 @@ export function Tasks() {
   const [draft, setDraft] = useState<Draft>(emptyDraft);
   const [saving, setSaving] = useState(false);
   const [nudgingId, setNudgingId] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ msg: string; type: 'success' | 'error' } | null>(null);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 4000);
+    return () => clearTimeout(t);
+  }, [toast]);
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [recipientSearch, setRecipientSearch] = useState('');
   const [recipientFilter, setRecipientFilter] = useState<'all' | 'groups' | 'contacts'>('all');
@@ -275,10 +282,12 @@ export function Tasks() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        alert(`Falha no envio: ${data?.error ?? res.statusText}`);
+        setToast({ msg: `Falha no envio: ${data?.error ?? res.statusText}`, type: 'error' });
+      } else {
+        setToast({ msg: 'Cobrança enviada com sucesso!', type: 'success' });
       }
     } catch (e: any) {
-      alert(`Erro de rede: ${e?.message ?? 'desconhecido'}`);
+      setToast({ msg: `Erro de rede: ${e?.message ?? 'desconhecido'}`, type: 'error' });
     } finally {
       setNudgingId(null);
       setTasks((prev) =>
@@ -410,12 +419,12 @@ export function Tasks() {
 
         <div style={{ display: 'flex', gap: '6px' }}>
           <button
-            onClick={() => forceAiNudge(t)}
+            onClick={(e) => { e.preventDefault(); e.stopPropagation(); forceAiNudge(t); }}
             disabled={nudgingId === t.id}
             className="neon-btn"
             style={{ flex: 1, padding: '8px 10px', fontSize: '11.5px', justifyContent: 'center' }}
           >
-            <Send size={12} />
+            {nudgingId === t.id ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />}
             {nudgingId === t.id ? 'Enviando...' : 'Cobrar via IA'}
           </button>
           <button
@@ -497,7 +506,21 @@ export function Tasks() {
   }
 
   return (
-    <div className="page-container" style={{ maxWidth: '1600px' }}>
+    <div className="page-container" style={{ maxWidth: '1600px', position: 'relative' }}>
+      {toast && (
+        <div style={{
+          position: 'fixed', bottom: '24px', right: '24px', zIndex: 9999,
+          padding: '12px 20px', borderRadius: '10px',
+          background: toast.type === 'success' ? 'rgba(0,200,120,0.15)' : 'rgba(255,60,60,0.15)',
+          border: `1px solid ${toast.type === 'success' ? 'rgba(0,200,120,0.4)' : 'rgba(255,60,60,0.4)'}`,
+          color: toast.type === 'success' ? '#4fffb0' : '#ff6b6b',
+          fontSize: '13px', fontWeight: 500, backdropFilter: 'blur(12px)',
+          boxShadow: '0 4px 24px rgba(0,0,0,0.3)',
+        }}>
+          {toast.type === 'success' ? <Check size={14} style={{ display: 'inline', marginRight: '6px', verticalAlign: '-2px' }} /> : <AlertCircle size={14} style={{ display: 'inline', marginRight: '6px', verticalAlign: '-2px' }} />}
+          {toast.msg}
+        </div>
+      )}
       <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: '28px', flexWrap: 'wrap', gap: '16px' }}>
         <div>
           <div style={{ fontSize: '11px', color: '#6b7384', letterSpacing: '2px', textTransform: 'uppercase', fontWeight: 600, marginBottom: '6px' }}>
