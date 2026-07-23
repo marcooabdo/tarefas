@@ -68,6 +68,27 @@ Deno.serve(async (req: Request) => {
 
     await Promise.allSettled(forwards);
 
+    // Log relay failures to webhook_events for visibility
+    const failedRelays = results.filter((r) => !r.ok);
+    if (failedRelays.length > 0) {
+      for (const r of failedRelays) {
+        console.error(`[relay] FAILED ${r.url} => ${r.status}`);
+      }
+      // Log to DB so we can troubleshoot
+      let remoteJid = "";
+      try {
+        const parsed = JSON.parse(rawBody);
+        const d = parsed?.data ?? parsed;
+        remoteJid = d?.key?.remoteJid ?? "";
+      } catch { /* ignore */ }
+      await supabase.from("webhook_events").insert({
+        event: "relay-forward-failure",
+        outcome: "error",
+        remote_jid: remoteJid,
+        notes: failedRelays.map((r) => `${r.url} => ${r.status}`).join("; "),
+      });
+    }
+
     return new Response(
       JSON.stringify({
         relayed_to: results.length,
