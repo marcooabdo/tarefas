@@ -102,13 +102,16 @@ Deno.serve(async (req: Request) => {
     // (another invocation may have already claimed it).
     const due_now: typeof due_now_raw = [];
     for (const t of due_now_raw) {
-      const oldNudge = t.last_ai_nudge ?? "1970-01-01T00:00:00Z";
-      const { count } = await supabase
+      let query = supabase
         .from("tasks")
         .update({ last_ai_nudge: nowIso })
-        .eq("id", t.id)
-        .eq("last_ai_nudge", oldNudge)
-        .select("id", { count: "exact", head: true });
+        .eq("id", t.id);
+      if (t.last_ai_nudge === null || t.last_ai_nudge === undefined) {
+        query = query.is("last_ai_nudge", null);
+      } else {
+        query = query.eq("last_ai_nudge", t.last_ai_nudge);
+      }
+      const { count } = await query.select("id", { count: "exact", head: true });
       if (count && count > 0) {
         due_now.push(t);
       }
@@ -301,16 +304,15 @@ Deno.serve(async (req: Request) => {
 
         if (ok) {
           if (isRecurring) {
-            // Recurring task: reschedule to next occurrence, always stays active
-            const nextDue = nextDueDate(task.due_date ?? task.first_nudge_at, recurrence, recurrenceInterval);
+            // Recurring task: schedule next nudge relative to NOW, not due_date
+            const nextNudge = nextDueDate(new Date().toISOString(), recurrence, recurrenceInterval);
             await supabase
               .from("tasks")
               .update({
                 ai_interventions: (task.ai_interventions ?? 0) + 1,
                 last_ai_nudge: new Date().toISOString(),
-                status: "pending",
-                due_date: nextDue,
-                first_nudge_at: nextDue,
+                status: "awaiting_response",
+                first_nudge_at: nextNudge,
                 nudge_active: true,
               })
               .eq("id", task.id);
