@@ -132,11 +132,15 @@ Deno.serve(async (req: Request) => {
         ai_interventions: (task.ai_interventions ?? 0) + 1,
         gia_instruction: realInstruction,
       };
+      const recurrenceExact = String(task.recurrence ?? "none");
+      const isRecurringExact = recurrenceExact !== "none";
       if (realDeadline) {
         taskUpdate.due_date = realDeadline;
         taskUpdate.first_nudge_at = realDeadline;
         taskUpdate.nudge_active = true;
         taskUpdate.nudge_repeat_hours = realNudgeHours;
+      } else if (isRecurringExact) {
+        taskUpdate.nudge_active = true;
       } else {
         taskUpdate.nudge_active = false;
       }
@@ -148,12 +152,14 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    const isSendOnly = giaInstruction && /\b(s[oó]\s*(envi|mand)|apenas\s*(envi|mand)|sem\s*(pedir|cobrar)|n[aã]o\s*(pe[cç]a|cobr|pedir)|marque\s*como\s*conclu)/i.test(giaInstruction);
+    const recurrence = String(task.recurrence ?? "none");
+    const isRecurring = recurrence !== "none";
+
+    const isSendOnly = !isRecurring && (giaInstruction && /\b(s[oó]\s*(envi|mand)|apenas\s*(envi|mand)|sem\s*(pedir|cobrar)|n[aã]o\s*(pe[cç]a|cobr|pedir)|marque\s*como\s*conclu)/i.test(giaInstruction));
 
     const descriptionText = task.description ? `\nDetalhes: ${task.description}` : "";
 
-    const recurrence = String(task.recurrence ?? "none");
-    const isRecurring = recurrence !== "none";
+    const taskRef = task.task_code ?? "";
 
     let fallbackMessage: string;
     if (isSendOnly) {
@@ -164,9 +170,9 @@ Deno.serve(async (req: Request) => {
       fallbackMessage =
         `Olá ${task.assignee_name}! Aqui é a GIA, Executive Advisor do Sr. Marco Abdo.\n\n` +
         `Preciso de uma atualização sobre: *"${task.title}"*${descriptionText}\n` +
-        `Prazo: ${dueLabel}.`;
+        `Prazo: ${dueLabel}.\n\n` +
+        `Ao concluir, responda: *${taskRef} concluído*`;
     } else {
-      const taskRef = task.task_code ?? "";
       fallbackMessage =
         `Olá ${task.assignee_name}! Aqui é a GIA, Executive Advisor do Sr. Marco Abdo.\n\n` +
         `Preciso de uma atualização sobre: *"${task.title}"*${descriptionText}\n` +
@@ -209,8 +215,10 @@ Deno.serve(async (req: Request) => {
             `- Informe o prazo REAL da tarefa (${dueLabel}). NÃO invente prazos.\n` +
             `- Se o prazo é futuro, a data exata é: ${task.due_date ? new Date(new Date(task.due_date).getTime() - 3*60*60*1000).toISOString().slice(0,10) : "sem prazo"}\n` +
             `- Use emojis de forma natural e moderada.\n` +
-            `- Esta é uma tarefa RECORRENTE. NÃO inclua opções de status numeradas (1, 2, 3). NÃO peça para confirmar conclusão. NÃO inclua "Ao concluir, responda...".\n` +
-            `- Apenas cobre a atualização e peça o retorno de forma natural, sem menu de opções.\n\n` +
+            `- Esta é uma tarefa RECORRENTE. NÃO inclua opções de status numeradas (1, 2, 3).\n` +
+            `- Cobre a atualização de forma natural, sem menu de opções.\n` +
+            `- A mensagem DEVE terminar com EXATAMENTE: "Ao concluir, responda: *${taskRef} concluído*"\n` +
+            `- Essa instrução de conclusão é OBRIGATÓRIA em toda tarefa recorrente.\n\n` +
             `Nao inclua nada alem da mensagem final.`;
         } else {
           userBrief =
@@ -292,13 +300,10 @@ Deno.serve(async (req: Request) => {
       const recurrenceInterval = Number(task.recurrence_interval ?? 1) || 1;
 
       if (isRecurring && !isSendOnly) {
-        const nextDue = nextDueDate(task.due_date ?? task.first_nudge_at, recurrence, recurrenceInterval);
         await supabase.from("tasks").update({
           ai_interventions: (task.ai_interventions ?? 0) + 1,
           last_ai_nudge: now,
-          status: "pending",
-          due_date: nextDue,
-          first_nudge_at: nextDue,
+          status: "awaiting_response",
           nudge_active: true,
         }).eq("id", taskId);
       } else {
