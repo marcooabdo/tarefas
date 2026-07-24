@@ -169,12 +169,14 @@ Deno.serve(async (req: Request) => {
     } else if (isRecurring) {
       fallbackMessage =
         `Olá ${task.assignee_name}! Aqui é a GIA, Executive Advisor do Sr. Marco Abdo.\n\n` +
+        (taskRef ? `📋 Tarefa *${taskRef}*\n` : "") +
         `Preciso de uma atualização sobre: *"${task.title}"*${descriptionText}\n` +
         `Prazo: ${dueLabel}.\n\n` +
         `Ao concluir, responda: *${taskRef} concluído*`;
     } else {
       fallbackMessage =
         `Olá ${task.assignee_name}! Aqui é a GIA, Executive Advisor do Sr. Marco Abdo.\n\n` +
+        (taskRef ? `📋 Tarefa *${taskRef}*\n` : "") +
         `Preciso de uma atualização sobre: *"${task.title}"*${descriptionText}\n` +
         `Prazo: ${dueLabel}.\n\n` +
         `Ao concluir, responda: *${taskRef} concluído*`;
@@ -210,6 +212,7 @@ Deno.serve(async (req: Request) => {
             `\nINSTRUÇÕES OBRIGATÓRIAS:\n` +
             `- OBRIGATÓRIO: A mensagem DEVE começar com uma apresentação. Ex: "Olá [nome]! Aqui é a GIA, Executive Advisor do Sr. ${ownerNameNudge}."\n` +
             `- SIGA RIGOROSAMENTE todas as instruções do system prompt (emojis, tom, formato, apresentação)\n` +
+            `- OBRIGATÓRIO: Inclua o código da tarefa *${taskRef}* de forma visível na mensagem (ex: "Tarefa *${taskRef}*" ou "Referência: *${taskRef}*"). A pessoa precisa saber qual é o código.\n` +
             `- Explique claramente para a pessoa O QUE é a tarefa usando o título e a descrição fornecidos.\n` +
             `- Contextualize o que precisa ser feito de forma objetiva para que a pessoa entenda exatamente do que se trata.\n` +
             `- Informe o prazo REAL da tarefa (${dueLabel}). NÃO invente prazos.\n` +
@@ -232,6 +235,7 @@ Deno.serve(async (req: Request) => {
             `\nINSTRUÇÕES OBRIGATÓRIAS:\n` +
             `- OBRIGATÓRIO: A mensagem DEVE começar com uma apresentação. Ex: "Olá [nome]! Aqui é a GIA, Executive Advisor do Sr. ${ownerNameNudge}."\n` +
             `- SIGA RIGOROSAMENTE todas as instruções do system prompt (emojis, tom, formato, apresentação)\n` +
+            `- OBRIGATÓRIO: Inclua o código da tarefa *${taskRef}* de forma visível na mensagem (ex: "Tarefa *${taskRef}*" ou "Referência: *${taskRef}*"). A pessoa precisa saber qual é o código.\n` +
             `- Explique claramente para a pessoa O QUE é a tarefa usando o título e a descrição fornecidos.\n` +
             `- Contextualize o que precisa ser feito de forma objetiva para que a pessoa entenda exatamente do que se trata.\n` +
             `- Informe o prazo REAL da tarefa (${dueLabel}). NÃO invente prazos.\n` +
@@ -239,7 +243,7 @@ Deno.serve(async (req: Request) => {
             `- Use emojis de forma natural e moderada.\n` +
             `- ANTES da instrucao de conclusao, inclua EXATAMENTE estas opcoes de status (use emojis de numero):\n` +
             `"Por favor, confirme como esta essa tarefa:\n1️⃣ Em andamento\n2️⃣ Concluida\n3️⃣ Preciso de ajuda"\n` +
-            `- A mensagem DEVE terminar com EXATAMENTE: "Ao concluir, responda: ${task.task_code ?? ""} concluido"\n\n` +
+            `- A mensagem DEVE terminar com EXATAMENTE: "Ao concluir, responda: *${taskRef} concluido*"\n\n` +
             `Nao inclua nada alem da mensagem final.`;
         }
         const aiRes = await fetch("https://api.openai.com/v1/chat/completions", {
