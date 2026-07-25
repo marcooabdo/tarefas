@@ -1450,7 +1450,9 @@ REGRAS:
         let groupName = "";
         let resolveNote = "";
         const assigneeRaw = (fields.assignee ?? "").trim();
-        if (assigneeRaw) {
+        const selfWords = ["eu_mesmo", "eu", "mim", "pra mim", "para mim", "meu", "eu mesmo", "pra mim mesmo", "para mim mesmo"];
+        const isSelf = selfWords.includes(assigneeRaw.toLowerCase());
+        if (assigneeRaw && !isSelf) {
           const onlyDigits = normalizePhone(assigneeRaw);
           const looksLikePhone = onlyDigits.length >= 10 && /^[0-9+\s\-\(\)]+$/.test(assigneeRaw);
           if (looksLikePhone) {
@@ -1865,6 +1867,11 @@ REGRA CRITICA - message_only:
 - Quando message_only=true: NAO inclua "Ao concluir, responda: ATOM-XXXX concluido" e NAO inclua opcoes 1/2/3 na proposed_message. A mensagem deve ser APENAS o aviso/informacao, sem pedir confirmacao.
 - Quando message_only=false (padrao): INCLUA no final da proposed_message as opcoes 1/2/3 e "Ao concluir, responda: ATOM-XXXX concluido"
 
+REGRAS CRITICAS - DESTINO "PRA MIM" / "ME ENVIA":
+- Se o gestor diz "me envia", "envia pra mim", "manda pra mim", "no meu numero", "no meu privado", "pra mim mesmo", "pro meu numero", ou qualquer variacao indicando que ELE MESMO e o destinatario -> assignee = "EU_MESMO" (EXATAMENTE assim, em caps). NUNCA coloque o nome de outra pessoa ou grupo quando o gestor claramente diz que e para ele mesmo.
+- "me" antes do verbo (me envia, me manda) = para o proprio gestor = "EU_MESMO"
+- "pra mim" / "para mim" / "no meu" = para o proprio gestor = "EU_MESMO"
+
 REGRAS CRITICAS - DESTINO (PARA ONDE ENVIAR):
 - O campo "assignee" e o DESTINO da mensagem: para ONDE a mensagem sera enviada
 - REGRA MAIS IMPORTANTE: Use o nome EXATO de um contato/grupo da lista CONTATOS E GRUPOS CADASTRADOS acima. Faca fuzzy match: se o gestor diz "contabilidade", encontre o grupo que tem "contabilidade" no nome (ex: "Contabilidade Group Global"). Use o nome completo e exato como aparece na lista.
@@ -1995,6 +2002,9 @@ REGRAS GERAIS:
               const inlinePhoneFromGPT = parsed.assignee_phone ? String(parsed.assignee_phone).replace(/[^\d]/g, "") : null;
               const inlinePhone = inlinePhoneFromText || (inlinePhoneFromGPT && inlinePhoneFromGPT.length >= 10 ? inlinePhoneFromGPT : null);
 
+              const selfWordsNL = ["eu_mesmo", "eu", "mim", "pra mim", "para mim", "meu", "eu mesmo", "pra mim mesmo", "para mim mesmo"];
+              const isSelfNL = selfWordsNL.includes(assigneeRaw.toLowerCase());
+
               if (inlinePhone) {
                 const normalized = inlinePhone.length <= 11 ? "55" + inlinePhone : (inlinePhone.startsWith("55") ? inlinePhone : "55" + inlinePhone);
                 assigneePhone = normalized;
@@ -2032,7 +2042,7 @@ REGRAS GERAIS:
                     await logEvent("gia-nl-auto-saved-contact", `name="${nameFromUser}" phone=${normalized}`);
                   }
                 }
-              } else if (assigneeRaw) {
+              } else if (assigneeRaw && !isSelfNL) {
                 // Search in contacts - filter by is_group when GPT identified a group target
                 let contactQuery = supabase
                   .from("contacts")
